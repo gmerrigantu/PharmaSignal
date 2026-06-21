@@ -1,6 +1,6 @@
 # PharmaSignal — Limitations & Responsible Use
 
-PharmaSignal is an **educational / portfolio** analytics platform. It is **not**
+PharmaSignal is a **research** analytics platform. It is **not**
 clinical advice, regulatory guidance, medical diagnosis, causal inference, or
 incidence estimation.
 

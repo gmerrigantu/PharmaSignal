@@ -76,7 +76,7 @@ const navGroups: { label: string; items: { id: Section; icon: typeof Activity }[
 ];
 
 const sectionMeta: Record<Section, { eyebrow: string; title: string; sub: string }> = {
-  Overview: { eyebrow: "Surveillance", title: "Signal overview", sub: "Portfolio-level view of disproportionality, emerging risk, and supporting literature." },
+  Overview: { eyebrow: "Surveillance", title: "Signal overview", sub: "System-level view of disproportionality, emerging risk, and supporting literature." },
   Explorer: { eyebrow: "Analysis", title: "Signal explorer", sub: "Inspect and rank every drug–event pair with full disproportionality statistics." },
   Profiles: { eyebrow: "Analysis", title: "Profiles", sub: "Per-drug and per-event reporting patterns, population context, and subgroup breakdowns." },
   Interactions: { eyebrow: "Analysis", title: "Drug interactions", sub: "Co-reported drug pairs whose combined reporting exceeds either agent alone — candidate interaction signals." },
