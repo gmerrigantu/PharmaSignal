@@ -12,6 +12,7 @@ import {
   Inbox,
   Info,
   Layers,
+  ListFilter,
   Microscope,
   ShieldAlert,
   Sparkles,
@@ -557,18 +558,33 @@ function barH(v: number, row: EmergingSignal): string {
 export function Evidence({
   articles,
   selected,
+  showAll,
+  totalCount,
+  onToggleAll,
 }: {
   articles: LiteratureArticle[];
   selected?: EmergingSignal;
+  showAll: boolean;
+  totalCount: number;
+  onToggleAll: () => void;
 }) {
+  const scoped = Boolean(selected) && !showAll;
   return (
     <div className="grid-2">
       <Panel
         title="Literature evidence"
         caption={
-          selected
-            ? `Filtered to ${titleCase(selected.drug_name_normalized)} · ${titleCase(selected.adverse_event)}. Retrieval support is not causal proof.`
+          scoped
+            ? `Filtered to ${titleCase(selected!.drug_name_normalized)} · ${titleCase(selected!.adverse_event)}. Retrieval support is not causal proof.`
             : "PubMed retrieval support across all signals. Retrieval is not causal proof."
+        }
+        action={
+          selected ? (
+            <button className="button secondary" onClick={onToggleAll}>
+              <ListFilter size={15} />
+              {scoped ? `Show all (${totalCount})` : "Focus selected"}
+            </button>
+          ) : undefined
         }
       >
         {articles.length ? <EvidenceLine articles={articles} /> : <Empty icon={Inbox}>No matching articles.</Empty>}

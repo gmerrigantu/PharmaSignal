@@ -104,6 +104,7 @@ export function DashboardClient({ data }: { data: DashboardData }) {
   const [selectedSignal, setSelectedSignal] = useState<EmergingSignal | undefined>(
     [...data.emerging_signals].sort((a, b) => b.priority_score - a.priority_score)[0],
   );
+  const [showAllEvidence, setShowAllEvidence] = useState(false);
 
   const classes = useMemo(
     () => ["All", ...Array.from(new Set(data.signal_scores.map((d) => d.drug_class))).sort()],
@@ -147,14 +148,14 @@ export function DashboardClient({ data }: { data: DashboardData }) {
   );
 
   const evidenceArticles = useMemo(() => {
-    if (!selectedSignal) return data.pubmed_evidence;
+    if (showAllEvidence || !selectedSignal) return data.pubmed_evidence;
     const m = data.pubmed_evidence.filter(
       (a) =>
         a.drug_name_normalized === selectedSignal.drug_name_normalized &&
         a.adverse_event === selectedSignal.adverse_event,
     );
     return m.length ? m : data.pubmed_evidence;
-  }, [data.pubmed_evidence, selectedSignal]);
+  }, [data.pubmed_evidence, selectedSignal, showAllEvidence]);
 
   const isLive = data.data_source !== "demo";
   const showSignalFilters = section === "Explorer" || section === "Overview";
@@ -347,7 +348,7 @@ export function DashboardClient({ data }: { data: DashboardData }) {
                   filteredSignals={filteredSignals}
                   emerging={emerging}
                   labelMap={labelMap}
-                  onSelectSignal={(s) => { setSelectedSignal(s); setSection("Evidence"); }}
+                  onSelectSignal={(s) => { setSelectedSignal(s); setShowAllEvidence(false); setSection("Evidence"); }}
                   onGoNovel={() => { setFilters((p) => ({ ...p, showNovelOnly: true, showFlaggedOnly: false })); setSection("Explorer"); }}
                 />
               )}
@@ -364,8 +365,16 @@ export function DashboardClient({ data }: { data: DashboardData }) {
                 />
               )}
               {section === "Interactions" && <Interactions rows={data.interaction_signals ?? []} />}
-              {section === "Emerging" && <Emerging rows={emerging} selected={selectedSignal} onSelect={setSelectedSignal} />}
-              {section === "Evidence" && <Evidence articles={evidenceArticles} selected={selectedSignal} />}
+              {section === "Emerging" && <Emerging rows={emerging} selected={selectedSignal} onSelect={(s) => { setSelectedSignal(s); setShowAllEvidence(false); }} />}
+              {section === "Evidence" && (
+                <Evidence
+                  articles={evidenceArticles}
+                  selected={selectedSignal}
+                  showAll={showAllEvidence}
+                  totalCount={data.pubmed_evidence.length}
+                  onToggleAll={() => setShowAllEvidence((v) => !v)}
+                />
+              )}
               {section === "NHANES" && <Nhanes rows={data.nhanes_population_context} />}
               {section === "Health" && <Health data={data} />}
               {section === "Method" && <Method />}
