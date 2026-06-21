@@ -1,0 +1,21 @@
+# PharmaSignal — configurable signal-prioritization thresholds.
+# These are PRIORITIZATION rules, not clinical conclusions. See docs/methodology.md.
+version: 1
+signal_thresholds:
+  minimum_reports: 3            # minimum `a` (drug+event reports) to flag
+  ror_lower_ci_threshold: 1.0   # ROR 95% lower CI must exceed this
+  prr_threshold: 2.0
+  chi_square_threshold: 4.0
+  trend_baseline_quarters: 4    # trailing window for anomaly baseline
+  high_priority_score: 0.75
+  moderate_priority_score: 0.50
+  small_n_nhanes_warning: 30    # flag NHANES estimates below this unweighted n
+  very_small_n_nhanes_warning: 10
+
+# Composite priority score weights (must sum to 1.0). See §9.6.
+priority_weights:
+  disproportionality: 0.30
+  trend_anomaly: 0.25
+  seriousness: 0.20
+  literature_support: 0.15
+  population_context: 0.10

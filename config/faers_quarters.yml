@@ -1,0 +1,35 @@
+# PharmaSignal — FAERS scope configuration.
+#
+# `api_mode` (MVP default): build silver/gold tables from the openFDA Drug Adverse
+# Event API. Fast to run, no large downloads, good for prototyping and demos.
+#
+# `quarterly_file_mode` (production path): download the official FAERS quarterly
+# ZIP extract files and parse the relational ASCII tables. Heavier but exposes the
+# full relational structure. See src/pharmasignal/ingestion/faers_quarterly.py.
+version: 1
+
+ingestion_mode: api          # api | quarterly_file
+
+# Time window used for API-mode scoring + quarterly trend.
+window:
+  start_date: "2021-01-01"
+  end_date: "2025-12-31"
+
+# Quarters to download in quarterly_file_mode (last ~12-20 quarters recommended).
+# Format: YYYYqQ. The downloader maps these to the FDA extract file URLs.
+quarters:
+  - 2021q1
+  - 2021q2
+  - 2021q3
+  - 2021q4
+  - 2022q1
+  - 2022q2
+  - 2022q3
+  - 2022q4
+  - 2023q1
+  - 2023q2
+  - 2023q3
+  - 2023q4
+
+# How many top reaction terms to pull per drug when assembling the signal matrix.
+top_events_per_drug: 100

@@ -1,0 +1,17 @@
+# PharmaSignal runtime dependencies (pinned loosely for portfolio reproducibility).
+# Core lakehouse + analytics
+pandas>=2.0
+pyarrow>=14.0          # Parquet read/write
+duckdb>=0.10           # query-on-demand over Parquet (local lakehouse)
+numpy>=1.26
+PyYAML>=6.0
+requests>=2.31
+
+# Dashboard
+streamlit>=1.40
+altair>=5.0            # bubble / CI / trend charts
+
+# NHANES XPT parsing (pandas.read_sas backend) + survey stats
+# (pandas reads .xpt natively; no extra dep required for MVP)
+
+# Dev / test (install with: pip install -r requirements-dev.txt)

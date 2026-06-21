@@ -1,0 +1,46 @@
+# Virtualenvs
+FDA-AE/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local lakehouse data (reproducible from pipeline; do not commit large data)
+data/bronze/
+data/silver/
+data/gold/
+!data/**/.gitkeep
+
+# Secrets — NEVER commit credentials or API keys
+.env
+.env.*
+*.env
+!.env.example
+!frontend/.env.example
+secrets.*
+.streamlit/secrets.toml
+*.pem
+*.key
+.aws/
+
+# Node / Next.js frontend
+node_modules/
+.next/
+out/
+dist/
+
+# Defensive: stray dirs created if a path is ever mis-joined (absolute local root or
+# an s3:// URI written to a local path). The storage bug that caused these is fixed.
+/Users/
+/s3:/
+s3:/
+
+# OS / editor
+.DS_Store
+.ipynb_checkpoints/
+.claude/
+.pytest_cache/
+*.tsbuildinfo
+
+# Keep the bundled demo dataset (small, deterministic) so reviewers can run offline
+!sample_data/

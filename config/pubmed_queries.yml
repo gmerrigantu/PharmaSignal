@@ -1,0 +1,24 @@
+# PharmaSignal — PubMed retrieval configuration (NCBI E-utilities).
+version: 1
+eutils:
+  base_url: https://eutils.ncbi.nlm.nih.gov/entrez/eutils
+  # Optional NCBI API key raises rate limit from 3 to 10 requests/sec.
+  # Set via env var NCBI_API_KEY (never commit it). See docs/limitations.md.
+  tool_name: pharmasignal
+  email_env: NCBI_EMAIL          # set NCBI_EMAIL so NCBI can contact you (etiquette)
+  max_articles_per_pair: 25
+  retrieval_timeout_seconds: 30
+
+# Deterministic query template. {drug}/{event} are normalized terms; synonyms come
+# from drugs_of_interest.yml brand/alias lists.
+query_template: '("{drug}"[Title/Abstract] OR {synonyms}) AND "{event}"[Title/Abstract]'
+
+# Terms that signal an adverse / safety context in titles/abstracts (relevance boost).
+adverse_context_terms:
+  - adverse
+  - safety
+  - side effect
+  - toxicity
+  - risk
+  - pharmacovigilance
+  - case report

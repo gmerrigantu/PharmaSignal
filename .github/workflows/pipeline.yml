@@ -1,0 +1,53 @@
+name: PharmaSignal pipeline
+
+# Scheduled batch refresh of the openFDA-derived gold tables (requirements §5.1, §15.1).
+# Daily is plenty — FAERS/openFDA update on a slow cadence.
+on:
+  schedule:
+    - cron: "17 6 * * *"   # 06:17 UTC daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write          # for AWS OIDC role assumption (optional S3 sync)
+
+jobs:
+  build-gold:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pip install pytest && PYTHONPATH=src pytest -q
+
+      - name: Build gold tables from openFDA
+        env:
+          OPENFDA_API_KEY: ${{ secrets.OPENFDA_API_KEY }}
+        run: PYTHONPATH=src python -m pharmasignal.pipeline.build_gold
+
+      # Optional: publish gold tables to S3 (requires AWS_ROLE_ARN repo variable).
+      - name: Configure AWS credentials (OIDC)
+        if: vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Sync gold tables to S3
+        if: vars.AWS_ROLE_ARN != '' && vars.LAKE_BUCKET != ''
+        run: aws s3 sync data/gold "s3://${{ vars.LAKE_BUCKET }}/gold/"
+
+      - name: Upload gold tables as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gold-tables
+          path: data/gold/*.parquet
+          if-no-files-found: warn

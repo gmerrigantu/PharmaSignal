@@ -1,0 +1,61 @@
+# PharmaSignal — NHANES ingestion / harmonization config.
+# NHANES is POPULATION CONTEXT ONLY. It is never linked to FAERS at the person level.
+# See docs/methodology.md and §10 of the requirements document.
+#
+# IMPORTANT REAL-DATA NOTE: the public NHANES 2021-2023 (cycle "L") prescription file
+# (RXQ_RX_L) only records a gate question + medication COUNT — it does NOT release
+# per-drug names (detailed drug data is restricted to the NCHS Research Data Center).
+# Therefore medication-level prevalence uses the public PRE-PANDEMIC 2017-2020 cycle
+# (the "P_" files), which DO include generic drug names (RXDDRUG) and early GLP-1 use.
+# This is exactly the sparsity/limitation the spec anticipates (§8.3, §10.3).
+version: 1
+
+# Active cycle for medication-level population context.
+cycle: "2017-2020"
+base_url: https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2017/DataFiles
+
+# Pre-pandemic complex-survey design variables.
+design:
+  mec_weight_var: WTMECPRP        # MEC exam weight (used when merging exam/lab data)
+  interview_weight_var: WTINTPRP
+  strata_var: SDMVSTRA
+  psu_var: SDMVPSU
+  sex_var: RIAGENDR               # 1 = male, 2 = female
+  age_var: RIDAGEYR
+
+# Files to download for the active cycle (component drives the bronze prefix).
+files:
+  demographics:
+    component: demographics
+    filename: P_DEMO.xpt
+  prescriptions:
+    component: questionnaire
+    filename: P_RXQ_RX.xpt
+    drug_name_var: RXDDRUG        # generic drug name string (one row per drug per person)
+    days_taken_var: RXDDAYS
+  body_measures:
+    component: examination
+    filename: P_BMX.xpt
+    bmi_var: BMXBMI
+  glycohemoglobin:
+    component: laboratory
+    filename: P_GHB.xpt
+    hba1c_var: LBXGH
+  diabetes:
+    component: questionnaire
+    filename: P_DIQ.xpt
+    diagnosed_var: DIQ010          # "Doctor told you have diabetes" (1 = yes)
+
+# Map NHANES generic drug strings (uppercased) to PharmaSignal canonical names.
+# NHANES combination products appear as "DRUG_A; DRUG_B"; the ingester splits on ';'.
+medication_name_map:
+  SEMAGLUTIDE: semaglutide
+  LIRAGLUTIDE: liraglutide
+  DULAGLUTIDE: dulaglutide
+  EXENATIDE: exenatide
+  TIRZEPATIDE: tirzepatide
+  SITAGLIPTIN: sitagliptin
+  LINAGLIPTIN: linagliptin
+  EMPAGLIFLOZIN: empagliflozin
+  DAPAGLIFLOZIN: dapagliflozin
+  METFORMIN: metformin

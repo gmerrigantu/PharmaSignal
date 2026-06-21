@@ -1,0 +1,52 @@
+# PharmaSignal — selected drug domain (MVP)
+# Domain: metabolic / obesity / diabetes medications, focused on GLP-1 class.
+# Raw FAERS names are messy; `aliases` lists the raw uppercase strings we expect
+# to see in `patient.drug.medicinalproduct`. `canonical_name` is the normalized
+# analysis key. Never overwrite raw source names — see docs/methodology.md.
+version: 1
+drug_classes:
+  glp1_receptor_agonists:
+    display_name: GLP-1 receptor agonists
+    drugs:
+      - canonical_name: semaglutide
+        brands: [Ozempic, Wegovy, Rybelsus]
+        aliases: [SEMAGLUTIDE, OZEMPIC, WEGOVY, RYBELSUS]
+      - canonical_name: liraglutide
+        brands: [Victoza, Saxenda]
+        aliases: [LIRAGLUTIDE, VICTOZA, SAXENDA]
+      - canonical_name: dulaglutide
+        brands: [Trulicity]
+        aliases: [DULAGLUTIDE, TRULICITY]
+      - canonical_name: exenatide
+        brands: [Byetta, Bydureon]
+        aliases: [EXENATIDE, BYETTA, BYDUREON]
+  dual_gip_glp1_agonists:
+    display_name: Dual GIP/GLP-1 receptor agonists
+    drugs:
+      - canonical_name: tirzepatide
+        brands: [Mounjaro, Zepbound]
+        aliases: [TIRZEPATIDE, MOUNJARO, ZEPBOUND]
+  dpp4_inhibitors:
+    display_name: DPP-4 inhibitors
+    drugs:
+      - canonical_name: sitagliptin
+        brands: [Januvia]
+        aliases: [SITAGLIPTIN, JANUVIA]
+      - canonical_name: linagliptin
+        brands: [Tradjenta]
+        aliases: [LINAGLIPTIN, TRADJENTA]
+  sglt2_inhibitors:
+    display_name: SGLT2 inhibitors
+    drugs:
+      - canonical_name: empagliflozin
+        brands: [Jardiance]
+        aliases: [EMPAGLIFLOZIN, JARDIANCE]
+      - canonical_name: dapagliflozin
+        brands: [Farxiga]
+        aliases: [DAPAGLIFLOZIN, FARXIGA]
+  biguanides:
+    display_name: Biguanides
+    drugs:
+      - canonical_name: metformin
+        brands: [Glucophage, Fortamet]
+        aliases: [METFORMIN, GLUCOPHAGE, FORTAMET]
