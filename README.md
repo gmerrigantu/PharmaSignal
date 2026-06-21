@@ -6,7 +6,7 @@
 > medallion lakehouse with statistical signal detection, NLP, and an interactive
 > Streamlit dashboard. Initial domain: **metabolic / GLP-1 therapies**.
 
-⚠️ **Educational / portfolio project — not clinical advice.** FAERS signals are
+⚠️ **Research tool — not clinical advice.** FAERS signals are
 *hypothesis-generating reporting associations*, not causality, incidence, or
 prevalence. See [docs/limitations.md](docs/limitations.md).
 
@@ -21,7 +21,7 @@ make dashboard      # launch Streamlit -> http://localhost:8501
 make test           # 24 unit tests for the formulas + data contracts
 ```
 
-The dashboard ships with a deterministic demo dataset so reviewers can explore it
+The dashboard ships with a deterministic demo dataset so users can explore it
 with **zero credentials**. To use live data, run the pipeline:
 
 ```bash
@@ -90,17 +90,6 @@ phased roadmap and acceptance criteria, and
 [docs/future_enhancements.md](docs/future_enhancements.md) for a backlog of additional
 data sources and features (drug-label flags, RxNorm, subgroup signals, EBGM, drug-drug
 interactions, FastAPI serving, and more).
-
-## Resume bullets
-- Built a cloud-native pharmacovigilance lakehouse integrating FDA FAERS, NHANES, and
-  PubMed with bronze/silver/gold modeling, data-quality checks, and dashboard-ready
-  gold marts (Parquet/DuckDB, S3/Athena-ready, IaC via Terraform).
-- Developed drug-safety signal detection using ROR, PRR, confidence intervals,
-  empirical-Bayes shrinkage, and time-series anomaly detection over adverse-event data.
-- Contextualized FAERS signals with NHANES survey-weighted medication-exposure
-  estimates and population clinical profiles (age, sex, BMI, HbA1c, diabetes).
-- Integrated PubMed literature retrieval + relevance scoring to link high-priority
-  signals to biomedical citations, with responsible, non-causal communication.
 
 ## License
 MIT (educational use). FAERS, NHANES, and PubMed data are subject to their respective

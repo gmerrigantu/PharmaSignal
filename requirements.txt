@@ -1,4 +1,4 @@
-# PharmaSignal runtime dependencies (pinned loosely for portfolio reproducibility).
+# PharmaSignal runtime dependencies (pinned loosely for reproducibility).
 # Core lakehouse + analytics
 pandas>=2.0
 pyarrow>=14.0          # Parquet read/write

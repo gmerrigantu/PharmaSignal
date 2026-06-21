@@ -82,6 +82,53 @@ export type QualityCheck = {
   detail: string;
 };
 
+export type InteractionSignal = {
+  drug_a: string;
+  drug_b: string;
+  adverse_event: string;
+  co_reports: number;
+  pair_event_reports: number;
+  ror_combination: number;
+  ror_ci_lower: number;
+  ror_ci_upper: number;
+  prr_combination: number;
+  chi_square: number;
+  ror_drug_a: number | null;
+  ror_drug_b: number | null;
+  single_max_ror: number | null;
+  comparable: boolean;
+  interaction_ratio: number | null;
+  interaction_flag: boolean;
+};
+
+export type SubgroupSignal = {
+  drug_name_normalized: string;
+  drug_class: string;
+  adverse_event: string;
+  subgroup_type: "sex" | "age";
+  subgroup: string;
+  stratum_reports: number;
+  stratum_population: number;
+  ror: number;
+  ror_ci_lower: number;
+  ror_ci_upper: number;
+  prr: number;
+  chi_square: number;
+  overall_ror: number;
+};
+
+export type LabelStatus = "labeled" | "novel" | "unknown";
+
+export type DrugLabelFlag = {
+  drug_name_normalized: string;
+  adverse_event: string;
+  labeled_event: boolean;
+  label_section: string | null;
+  label_found: boolean;
+  label_status: LabelStatus;
+  novel_flag: boolean;
+};
+
 export type DashboardData = {
   generated_at: string;
   data_source: "demo" | "pipeline" | "s3" | "api";
@@ -91,6 +138,10 @@ export type DashboardData = {
   pubmed_evidence: LiteratureArticle[];
   pipeline_health: PipelineHealth[];
   data_quality_checks: QualityCheck[];
+  /** Advanced marts — present on the cloud lakehouse; default to [] when absent. */
+  interaction_signals?: InteractionSignal[];
+  subgroup_signals?: SubgroupSignal[];
+  drug_label_flags?: DrugLabelFlag[];
 };
 
 export type Filters = {
@@ -99,4 +150,5 @@ export type Filters = {
   priority: PriorityLevel | "All";
   minReports: number;
   showFlaggedOnly: boolean;
+  showNovelOnly: boolean;
 };

@@ -129,4 +129,4 @@ the Pipeline Health card.
   for local testing.
 - **Cost:** Lambda + HTTP API are pay-per-request with a generous free tier; with ISR
   caching the call volume is tiny. No always-on compute. Effectively ~$0/month at
-  portfolio traffic, on top of the ~$0.01/month S3 storage.
+  typical traffic, on top of the ~$0.01/month S3 storage.

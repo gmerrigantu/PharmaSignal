@@ -5,7 +5,7 @@ A backlog of additional data sources and features that build on the current plat
 Streamlit dashboard, S3/Athena serving). Each entry notes **why** it matters, **how**
 it plugs into the existing architecture, and a rough **effort/impact** read.
 
-Legend — Effort: 🟢 low · 🟡 medium · 🔴 high. Impact is portfolio + analytical value.
+Legend — Effort: 🟢 low · 🟡 medium · 🔴 high. Impact is analytical value.
 
 ---
 
@@ -84,7 +84,7 @@ dashboard page comparing each stratum's ROR to the overall. `make subgroups`.
 ### 8. Proper Empirical Bayes (MGPS / EBGM)
 **Why.** We have *simplified* shrinkage today. Implementing the industry-standard
 gamma-Poisson EBGM lets the project honestly claim the regulatory-grade method, as a
-clean, self-contained data-science showcase. Explicitly flagged in the spec (§9.4) as
+clean, self-contained implementation. Explicitly flagged in the spec (§9.4) as
 the "advanced modeling" upgrade.
 **How.** New estimator in `modeling/`; add `ebgm`, `eb05` (5th percentile) columns to
 `gold_signal_scores`; offer EBGM as an alternate ranking in the dashboard.
