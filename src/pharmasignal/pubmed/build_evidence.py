@@ -24,20 +24,47 @@ def _synonyms_for(drug: str) -> list[str]:
     return [drug]
 
 
-def build(top_n: int = 20, *, use_cache: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # Rank by the composite priority score from the emerging-signals mart (the trend +
-    # disproportionality + seriousness ranking). Fall back to ROR from signal_scores if
-    # emerging signals aren't available.
-    try:
-        ranked = read_gold("emerging_signals").sort_values("priority_score", ascending=False)
-    except FileNotFoundError:
-        ranked = read_gold("signal_scores").sort_values("ror", ascending=False)
-    top = ranked.head(top_n)
+def _candidate_pairs(top_n: int, *, min_reports: int = 25) -> list[tuple[str, str]]:
+    """Drug-event pairs to retrieve literature for, as an ordered, de-duplicated union of:
 
+      1. **Genuine disproportionality signals** — flagged pairs from ``signal_scores``
+         that are well-reported (>= ``min_reports``), ranked by report count. These are
+         the real, documentable associations (e.g. semaglutide->nausea); the emerging
+         mart's priority ranking alone misses them because it is dominated by
+         mass-reporting artifacts that have no literature.
+      2. **Trend-emerging signals** — top pairs from ``emerging_signals`` by composite
+         priority, so newly accelerating signals are covered too.
+    """
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _extend(df: pd.DataFrame) -> None:
+        for _, r in df.iterrows():
+            key = (r["drug_name_normalized"], r["adverse_event"])
+            if key not in seen:
+                seen.add(key)
+                pairs.append(key)
+
+    try:
+        ss = read_gold("signal_scores")
+        real = ss[(ss["disproportionality_flag"]) & (ss["a_drug_event"] >= min_reports)]
+        _extend(real.sort_values("a_drug_event", ascending=False).head(top_n))
+    except FileNotFoundError:
+        pass
+    try:
+        em = read_gold("emerging_signals").sort_values("priority_score", ascending=False)
+        _extend(em.head(top_n))
+    except FileNotFoundError:
+        if not pairs:  # neither mart present — last-resort ROR ranking
+            ss = read_gold("signal_scores").sort_values("ror", ascending=False)
+            _extend(ss.head(top_n))
+    return pairs
+
+
+def build(top_n: int = 25, *, use_cache: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
     evidence_rows: list[dict] = []
     summary_rows: list[dict] = []
-    for _, row in top.iterrows():
-        drug, event = row["drug_name_normalized"], row["adverse_event"]
+    for drug, event in _candidate_pairs(top_n):
         articles = eutils.search(drug, event, _synonyms_for(drug), use_cache=use_cache)
         scored = [relevance.score_article(a, drug, event) for a in articles]
         for s in scored:
@@ -77,7 +104,8 @@ def build(top_n: int = 20, *, use_cache: bool = True) -> tuple[pd.DataFrame, pd.
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--top", type=int, default=20)
+    parser.add_argument("--top", type=int, default=25,
+                        help="pairs to take from EACH source (flagged signals + emerging)")
     args = parser.parse_args()
     ev, summ = build(args.top)
     print(f"Wrote {len(ev)} evidence rows for {len(summ)} signals.")

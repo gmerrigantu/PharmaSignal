@@ -1,0 +1,13 @@
+# PharmaSignal serving API (FastAPI) — used by the Lambda container image and local dev.
+# Install:  pip install -r requirements-api.txt
+#   (for local dev also: pip install uvicorn)
+
+fastapi>=0.110        # ASGI web framework
+mangum>=0.17          # ASGI -> AWS Lambda adapter (used only in the Lambda runtime)
+
+# Lakehouse read path (reused from the core package — gold Parquet on local FS or S3)
+pandas>=2.0
+pyarrow>=14.0         # Parquet read
+duckdb>=0.10          # query-on-demand over the gold Parquet
+s3fs>=2024.0          # fsspec S3 backend (reads AWS creds from the Lambda role)
+PyYAML>=6.0

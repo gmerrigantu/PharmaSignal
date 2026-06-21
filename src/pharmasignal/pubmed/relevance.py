@@ -9,7 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..config import load_pubmed_config
-from .eutils import Article
+from ..ingestion.drug_label import americanize
+from .eutils import _EVENT_STOPWORDS, Article
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,21 @@ def _contains(text: str, term: str) -> bool:
     return term.lower() in (text or "").lower()
 
 
+def _event_present(text: str, event: str) -> bool:
+    """Event mentioned, tolerant of word order and British/American spelling — mirrors
+    the retrieval logic in eutils so word-order-variant hits score their event match
+    instead of being penalized to a drug-only score."""
+    blob = (text or "").lower()
+    for variant in {event.lower(), americanize(event.lower())}:
+        if variant and variant in blob:
+            return True
+        words = [w for w in variant.split()
+                 if len(w) > 3 and w.lower() not in _EVENT_STOPWORDS]
+        if len(words) > 1 and all(w in blob for w in words):
+            return True
+    return False
+
+
 def score_article(article: Article, drug: str, event: str) -> ScoredArticle:
     cfg = load_pubmed_config()
     adverse_terms = cfg.get("adverse_context_terms", [])
@@ -33,8 +49,8 @@ def score_article(article: Article, drug: str, event: str) -> ScoredArticle:
     blob = f"{title} {abstract}"
 
     mentions_drug = _contains(blob, drug)
-    mentions_event = _contains(blob, event)
-    in_title = _contains(title, drug) and _contains(title, event)
+    mentions_event = _event_present(blob, event)
+    in_title = _contains(title, drug) and _event_present(title, event)
     adverse_context = any(_contains(blob, t) for t in adverse_terms)
 
     # Transparent weighted sum, clipped to [0, 1].

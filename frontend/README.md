@@ -20,8 +20,10 @@ Without configuration, the app uses the built-in demo payload in `lib/demo-data.
 Set this environment variable locally or in Vercel:
 
 ```bash
-NEXT_PUBLIC_PHARMASIGNAL_API_BASE_URL=https://your-api-id.execute-api.us-east-1.amazonaws.com/prod
+NEXT_PUBLIC_PHARMASIGNAL_API_BASE_URL=https://your-api-id.execute-api.us-east-1.amazonaws.com
 ```
+
+AWS HTTP APIs use the `$default` stage in this project, so do not add `/prod`.
 
 The frontend currently expects:
 

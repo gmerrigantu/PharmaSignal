@@ -18,7 +18,14 @@ from xml.etree import ElementTree as ET
 import requests
 
 from ..config import load_pubmed_config
+from ..ingestion.drug_label import americanize  # British->American spelling normalizer
 from ..serving import storage
+
+# Words too generic to constrain an event phrase. Dropping them lets word-order variants
+# match (MedDRA "OPTIC ISCHAEMIC NEUROPATHY" vs literature "ischemic optic neuropathy")
+# without over-broadening to, e.g., every paper containing "disorder".
+_EVENT_STOPWORDS = {"the", "and", "with", "for", "of", "in", "nos",
+                    "syndrome", "disorder", "disease", "condition"}
 
 
 @dataclass(frozen=True)
@@ -67,11 +74,43 @@ def _eutils_get(url: str, params: dict, timeout: int, delay: float, retries: int
     raise last or requests.HTTPError("NCBI request failed")
 
 
+def _event_clause(event: str) -> str:
+    """A tolerant Title/Abstract clause for a MedDRA event term.
+
+    MedDRA preferred terms are exact British-spelled phrases that rarely appear verbatim
+    in the literature, so an exact ``"phrase"[Title/Abstract]`` match misses most real
+    papers (e.g. only 1 hit for the semaglutide/NAION signal). We match the exact phrase
+    OR all of its significant words ANDed (order-independent), across both the original
+    and Americanized spelling (ISCHAEMIC->ISCHEMIC, OEDEMA->EDEMA). Still fully
+    deterministic and explainable — no semantic expansion.
+    """
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def _add(clause: str) -> None:
+        if clause not in seen:
+            seen.add(clause)
+            parts.append(clause)
+
+    variants: list[str] = []
+    for v in (event, americanize(event.lower())):
+        v = v.strip()
+        if v and v not in variants:
+            variants.append(v)
+    for v in variants:
+        _add(f'"{v}"[Title/Abstract]')
+        words = [w for w in v.split() if len(w) > 3 and w.lower() not in _EVENT_STOPWORDS]
+        if len(words) > 1:
+            _add("(" + " AND ".join(f"{w}[Title/Abstract]" for w in words) + ")")
+    return "(" + " OR ".join(parts) + ")"
+
+
 def build_query(drug: str, event: str, synonyms: list[str] | None = None) -> str:
-    cfg = load_pubmed_config()
-    syn = synonyms or []
-    syn_expr = " OR ".join(f'"{s}"[Title/Abstract]' for s in syn) or f'"{drug}"[Title/Abstract]'
-    return cfg["query_template"].format(drug=drug, synonyms=syn_expr, event=event)
+    """``(drug OR brand synonyms) AND <tolerant event clause>``, all in Title/Abstract."""
+    syn = synonyms or [drug]
+    drug_clause = " OR ".join(f'"{s}"[Title/Abstract]' for s in syn) \
+        or f'"{drug}"[Title/Abstract]'
+    return f"({drug_clause}) AND {_event_clause(event)}"
 
 
 def search(drug: str, event: str, synonyms: list[str] | None = None, *, use_cache: bool = True) -> list[Article]:

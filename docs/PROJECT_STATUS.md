@@ -27,6 +27,7 @@ and acceptance criteria (§19). This is the handoff document.
 | 6 | IaC (Terraform) + cost docs + data-quality reports | ✅ | `infrastructure/`, `docs/` |
 | — | Data-quality checks → `pipeline_health` | ✅ | `quality/checks.py` |
 | — | GitHub Actions scheduled pipeline | ✅ | `.github/workflows/pipeline.yml` |
+| 7 | FastAPI serving layer (§13.1) + Lambda/API-Gateway IaC | ✅ | `api/`, `infrastructure/api_deploy.py` |
 
 ## MVP acceptance criteria (§19.1)
 - [x] Signal Explorer shows count, serious count, ROR, PRR, CI, trend per filters.
@@ -69,6 +70,18 @@ now rank above the artifact cluster.
   Drug Interactions page. `make interactions`.
 All three run on AWS and are registered as Glue/Athena tables (11 tables total).
 
+## Serving API (DONE — Option B)
+`api/` is a read-only FastAPI layer over the gold marts that decouples the frontend
+from S3. The Vercel-hosted Next.js app fetches it server-side (ISR-cached); the browser
+never holds AWS credentials and never queries Athena/S3 directly. Endpoints:
+`/dashboard/summary` (the frontend contract), `/signals`, `/emerging`, `/drugs/{drug}`,
+`/nhanes`, `/evidence`, `/interactions`, `/subgroups`, `/health`. Reads gold via
+DuckDB/pandas over S3 Parquet (not Athena — the marts are tiny). Runs locally
+(`make api-local`) or as an AWS **Lambda container image + HTTP API Gateway**
+(`infrastructure/api_deploy.py`, IAM role scoped to read-only S3). Full guide:
+[../infrastructure/API_DEPLOY.md](../infrastructure/API_DEPLOY.md). 8 API smoke tests
+(`tests/test_api.py`).
+
 ## Known gaps / next steps (deliberately deferred)
 - **Live data not materialized here.** `make pipeline`, `make nhanes`, `make pubmed`
   need network access; this build ships the deterministic **demo** dataset instead.
@@ -81,9 +94,11 @@ All three run on AWS and are registered as Glue/Athena tables (11 tables total).
   precision).
 - **NLP upgrades** (embeddings, topic modeling, NER, guarded LLM summaries) are
   scaffolded as a documented option, not built.
-- **Optional FastAPI serving layer** (§13.1) not built; dashboard reads gold directly.
 
 ## How this was verified
 - `make demo` generates 9 gold tables (2,226 rows) using the real modeling functions.
-- `pytest` → 24 passed (ROR/PRR/CI/shrinkage/trend/priority/normalization/quality).
+- `pytest` → 43 passed (ROR/PRR/CI/shrinkage/trend/priority/normalization/quality +
+  8 FastAPI serving-API smoke tests).
 - All 9 Streamlit pages render with no exceptions via `streamlit.testing.v1.AppTest`.
+- FastAPI `/dashboard/summary` verified to return the exact `DashboardData` contract
+  (NaN-free JSON) via `fastapi.testclient` and a live uvicorn boot.

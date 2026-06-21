@@ -6,7 +6,7 @@ PYTHONPATH ?= src
 ENV_FILE ?= .env
 ENV_PREFIX = set -a; [ ! -f $(ENV_FILE) ] || . $(ENV_FILE); set +a;
 
-.PHONY: help install install-dev demo pipeline pipeline-aws nhanes pubmed dashboard dashboard-aws test lint clean
+.PHONY: help install install-dev install-api demo pipeline pipeline-aws nhanes pubmed dashboard dashboard-aws api-local api-deploy api-url test lint clean
 
 help:
 	@echo "PharmaSignal make targets:"
@@ -22,6 +22,9 @@ help:
 	@echo "  pipeline-full Run pipeline -> nhanes -> pubmed -> enrich in order"
 	@echo "  dashboard    Launch the Streamlit dashboard"
 	@echo "  dashboard-aws Launch dashboard using .env, e.g. PHARMASIGNAL_DATA_ROOT=s3://bucket"
+	@echo "  api-local    Run the FastAPI serving layer locally (uvicorn :8000)"
+	@echo "  api-deploy   Build+push image and deploy Lambda + HTTP API (BUCKET=, CORS=)"
+	@echo "  api-url      Print the deployed API base URL"
 	@echo "  test         Run unit tests"
 	@echo "  clean        Remove generated lakehouse data (keeps sample_data/)"
 
@@ -30,6 +33,9 @@ install:
 
 install-dev:
 	$(PIP) install -r requirements-dev.txt
+
+install-api:
+	$(PIP) install -r requirements-api.txt uvicorn
 
 demo:
 	PYTHONPATH=$(PYTHONPATH) $(PY) -m pharmasignal.pipeline.generate_demo
@@ -66,6 +72,17 @@ dashboard:
 
 dashboard-aws:
 	$(ENV_PREFIX) PYTHONPATH=$(PYTHONPATH) $(PY) -m streamlit run dashboard/app.py
+
+# Serving API (FastAPI). Reads gold from .env's PHARMASIGNAL_DATA_ROOT (local or s3://).
+api-local:
+	$(ENV_PREFIX) PYTHONPATH=$(PYTHONPATH) $(PY) -m uvicorn pharmasignal.api.main:app --reload --port 8000
+
+# Deploy to AWS: make api-deploy BUCKET=pharmasignal-data-XXXX CORS=https://your-app.vercel.app
+api-deploy:
+	$(ENV_PREFIX) $(PY) infrastructure/api_deploy.py deploy --bucket $(BUCKET) --cors-origins "$(or $(CORS),*)"
+
+api-url:
+	$(ENV_PREFIX) $(PY) infrastructure/api_deploy.py url
 
 test:
 	PYTHONPATH=$(PYTHONPATH) $(PY) -m pytest -q

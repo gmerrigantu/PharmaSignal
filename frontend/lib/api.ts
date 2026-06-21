@@ -1,7 +1,36 @@
 import { demoData } from "./demo-data";
-import type { DashboardData } from "./types";
+import type {
+  DashboardData,
+  EmergingSignal,
+  LiteratureArticle,
+  NhanesContext,
+  PriorityLevel,
+  SignalScore,
+} from "./types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_PHARMASIGNAL_API_BASE_URL?.replace(/\/$/, "");
+
+/** True when an AWS API base URL is configured; otherwise the app serves demo data. */
+export const isLiveBackend = Boolean(API_BASE_URL);
+
+/**
+ * Fetch JSON from the PharmaSignal API. Server-rendered (and ISR-cached) so AWS is
+ * never called from the browser — the Vercel server hits API Gateway, which holds no
+ * client-visible credentials. `revalidate` matches the API's gold-refresh cadence.
+ */
+async function apiGet<T>(path: string, revalidate = 300): Promise<T> {
+  if (!API_BASE_URL) {
+    throw new Error("NEXT_PUBLIC_PHARMASIGNAL_API_BASE_URL is not set");
+  }
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: { accept: "application/json" },
+    next: { revalidate },
+  });
+  if (!response.ok) {
+    throw new Error(`PharmaSignal API ${path} returned ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
 
 export async function getDashboardData(): Promise<DashboardData> {
   if (!API_BASE_URL) {
@@ -9,16 +38,7 @@ export async function getDashboardData(): Promise<DashboardData> {
   }
 
   try {
-    const response = await fetch(`${API_BASE_URL}/dashboard/summary`, {
-      headers: { accept: "application/json" },
-      next: { revalidate: 300 },
-    });
-
-    if (!response.ok) {
-      throw new Error(`AWS API returned ${response.status}`);
-    }
-
-    return (await response.json()) as DashboardData;
+    return await apiGet<DashboardData>("/dashboard/summary");
   } catch (error) {
     console.error("Falling back to demo data:", error);
     return {
@@ -34,3 +54,43 @@ export async function getDashboardData(): Promise<DashboardData> {
     };
   }
 }
+
+// --- Optional resource endpoints (server-side filtering, for detail views) ------- //
+
+const qs = (params: Record<string, string | number | boolean | undefined>) => {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== "") sp.set(k, String(v));
+  }
+  const s = sp.toString();
+  return s ? `?${s}` : "";
+};
+
+export const getSignals = (params: {
+  drug?: string;
+  event?: string;
+  drug_class?: string;
+  flagged_only?: boolean;
+  min_reports?: number;
+  limit?: number;
+} = {}) => apiGet<SignalScore[]>(`/signals${qs(params)}`);
+
+export const getEmerging = (params: { priority?: PriorityLevel; limit?: number } = {}) =>
+  apiGet<EmergingSignal[]>(`/emerging${qs(params)}`);
+
+export const getNhanes = () => apiGet<NhanesContext[]>("/nhanes");
+
+export const getEvidence = (params: { drug?: string; event?: string } = {}) =>
+  apiGet<LiteratureArticle[]>(`/evidence${qs(params)}`);
+
+export type DrugProfile = {
+  drug_name_normalized: string;
+  data_source: DashboardData["data_source"];
+  signals: SignalScore[];
+  emerging: EmergingSignal[];
+  nhanes: NhanesContext[];
+  evidence: LiteratureArticle[];
+};
+
+export const getDrugProfile = (drug: string) =>
+  apiGet<DrugProfile>(`/drugs/${encodeURIComponent(drug)}`);
