@@ -676,7 +676,6 @@ export function Health({ data }: { data: DashboardData }) {
           <Stat icon={Layers} label="Gold rows" value={compactNumber(latest?.rows_gold ?? 0)} foot={`${compactNumber(latest?.rows_silver ?? 0)} silver`} />
           <Stat icon={BarChart3} label="Raw FAERS rows" value={compactNumber(latest?.rows_raw ?? 0)} foot={latest?.source ?? ""} />
           <Stat icon={AlertTriangle} label="Checks" value={`${latest?.warning_checks ?? 0} warn`} foot={`${latest?.failed_checks ?? 0} failed`} />
-          <Stat icon={FlaskConical} label="Est. run cost" value={`$${(latest?.estimated_cost_usd ?? 0).toFixed(2)}`} foot={latest?.run_id ?? ""} />
         </section>
         {latest?.notes && (
           <div className="disclaimer" style={{ marginTop: "1rem" }}>
