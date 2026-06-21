@@ -153,7 +153,7 @@ export function DashboardClient({ data }: { data: DashboardData }) {
           <div className="status-pill">
             {latest?.status === "pass" ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
             <span>
-              {data.data_source.toUpperCase()} source · refreshed{" "}
+              refreshed{" "}
               {latest ? new Date(latest.run_timestamp).toLocaleString() : "unknown"}
             </span>
           </div>
@@ -662,12 +662,11 @@ function Health({ data }: { data: DashboardData }) {
   return (
     <div className="workspace">
       <div className="panel">
-        <PanelHeader title="Pipeline health" caption="Operational trust, row counts, quality checks, and estimated run cost." />
+        <PanelHeader title="Pipeline health" caption="Operational trust, row counts, and quality checks." />
         <section className="kpi-grid">
           <MetricCard icon={<CheckCircle2 size={18} />} label="Status" value={latest?.status.toUpperCase() ?? "UNKNOWN"} trend={latest?.source_period ?? ""} />
           <MetricCard icon={<Database size={18} />} label="Gold rows" value={compactNumber(latest?.rows_gold ?? 0)} trend="Modeled tables" />
           <MetricCard icon={<AlertTriangle size={18} />} label="Warnings" value={String(latest?.warning_checks ?? 0)} trend={`${latest?.failed_checks ?? 0} failures`} />
-          <MetricCard icon={<Activity size={18} />} label="Run cost" value={`$${(latest?.estimated_cost_usd ?? 0).toFixed(2)}`} trend={latest?.source ?? "source"} />
         </section>
         <p className="panel-caption">{latest?.notes}</p>
       </div>
