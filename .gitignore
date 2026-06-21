@@ -44,3 +44,5 @@ s3:/
 
 # Keep the bundled demo dataset (small, deterministic) so reviewers can run offline
 !sample_data/
+
+update_notes.txt

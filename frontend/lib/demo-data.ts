@@ -1,4 +1,9 @@
-import type { DashboardData } from "./types";
+import type {
+  DashboardData,
+  DrugLabelFlag,
+  InteractionSignal,
+  SubgroupSignal,
+} from "./types";
 
 const signalScores = [
   ["SEMAGLUTIDE", "NAUSEA", "GLP-1 receptor agonist", 18742, 4.8, 4.6, 5.1, 4.1, 920.6, 0.13, 2.84, true],
@@ -23,6 +28,88 @@ const emergingSignals = [
   ["TIRZEPATIDE", "VOMITING", "Dual GIP/GLP-1 agonist", 1620, 1180, 0.37, 1.6, 0.14, 0.62, "Moderate", 9, true, "2026Q2"],
   ["DULAGLUTIDE", "CHONDRITIS", "GLP-1 receptor agonist", 22, 18, 0.22, 0.5, 0.36, 0.28, "Low", 1, false, "2026Q2"],
 ] as const;
+
+const classOf = (drug: string): string =>
+  (signalScores.find((r) => r[0] === drug)?.[2] as string | undefined) ?? "Metabolic agent";
+
+function interaction(
+  drug_a: string,
+  drug_b: string,
+  adverse_event: string,
+  co_reports: number,
+  pair_event_reports: number,
+  ror_comb: number,
+  ci_lo: number,
+  ci_hi: number,
+  ror_a: number,
+  ror_b: number,
+): InteractionSignal {
+  const single_max = Math.max(ror_a, ror_b);
+  const ratio = ror_comb / single_max;
+  return {
+    drug_a,
+    drug_b,
+    adverse_event,
+    co_reports,
+    pair_event_reports,
+    ror_combination: ror_comb,
+    ror_ci_lower: ci_lo,
+    ror_ci_upper: ci_hi,
+    prr_combination: Number((ror_comb * 0.82).toFixed(2)),
+    chi_square: Number((pair_event_reports * 0.6).toFixed(1)),
+    ror_drug_a: ror_a,
+    ror_drug_b: ror_b,
+    single_max_ror: single_max,
+    comparable: true,
+    interaction_ratio: Number(ratio.toFixed(2)),
+    interaction_flag: ci_lo > 1 && ratio >= 2,
+  };
+}
+
+function subgroup(
+  drug: string,
+  adverse_event: string,
+  subgroup_type: "sex" | "age",
+  sg: string,
+  stratum_reports: number,
+  overall_ror: number,
+  ror: number,
+  ci_lo: number,
+  ci_hi: number,
+): SubgroupSignal {
+  return {
+    drug_name_normalized: drug,
+    drug_class: classOf(drug),
+    adverse_event,
+    subgroup_type,
+    subgroup: sg,
+    stratum_reports,
+    stratum_population: Math.round(stratum_reports * 420 + 50000),
+    ror,
+    ror_ci_lower: ci_lo,
+    ror_ci_upper: ci_hi,
+    prr: Number((ror * 0.85).toFixed(2)),
+    chi_square: Number((stratum_reports * 0.05).toFixed(1)),
+    overall_ror,
+  };
+}
+
+function label(
+  drug: string,
+  adverse_event: string,
+  labeled: boolean,
+  section: string | null,
+): DrugLabelFlag {
+  return {
+    drug_name_normalized: drug,
+    adverse_event,
+    labeled_event: labeled,
+    label_section: section,
+    label_found: true,
+    label_status: labeled ? "labeled" : "novel",
+    novel_flag: !labeled,
+  };
+}
 
 export const demoData: DashboardData = {
   generated_at: "2026-06-20T12:00:00Z",
@@ -169,5 +256,50 @@ export const demoData: DashboardData = {
       status: "warn",
       detail: "Tirzepatide population estimates have a small unweighted sample.",
     },
+  ],
+  interaction_signals: [
+    // GLP-1 / dual-incretin + insulin → hypoglycaemia is the classic additive synergy.
+    interaction("SEMAGLUTIDE", "INSULIN GLARGINE", "HYPOGLYCAEMIA", 1840, 612, 14.2, 12.8, 15.7, 3.4, 6.8),
+    interaction("TIRZEPATIDE", "INSULIN GLARGINE", "HYPOGLYCAEMIA", 980, 388, 15.0, 13.2, 17.1, 3.1, 6.8),
+    interaction("SEMAGLUTIDE", "METFORMIN", "DIARRHOEA", 3120, 1042, 5.4, 4.9, 5.9, 2.4, 2.1),
+    interaction("LIRAGLUTIDE", "INSULIN GLARGINE", "HYPOGLYCAEMIA", 540, 191, 8.1, 6.9, 9.5, 1.7, 6.8),
+    interaction("SEMAGLUTIDE", "METFORMIN", "NAUSEA", 3120, 1610, 5.1, 4.8, 5.4, 4.8, 2.0),
+    interaction("TIRZEPATIDE", "METFORMIN", "VOMITING", 1280, 470, 4.4, 4.0, 4.9, 3.9, 1.9),
+  ],
+  subgroup_signals: [
+    // SEMAGLUTIDE · NAUSEA — concentrated in women, modest age gradient.
+    subgroup("SEMAGLUTIDE", "NAUSEA", "sex", "female", 11240, 4.8, 5.6, 5.3, 5.9),
+    subgroup("SEMAGLUTIDE", "NAUSEA", "sex", "male", 6890, 4.8, 4.1, 3.8, 4.4),
+    subgroup("SEMAGLUTIDE", "NAUSEA", "age", "18-64", 12880, 4.8, 5.0, 4.7, 5.3),
+    subgroup("SEMAGLUTIDE", "NAUSEA", "age", "65+", 5210, 4.8, 4.3, 3.9, 4.7),
+    // SEMAGLUTIDE · PANCREATITIS — concentrated in 65+.
+    subgroup("SEMAGLUTIDE", "PANCREATITIS", "sex", "female", 980, 2.7, 2.6, 2.2, 3.1),
+    subgroup("SEMAGLUTIDE", "PANCREATITIS", "sex", "male", 832, 2.7, 2.9, 2.4, 3.5),
+    subgroup("SEMAGLUTIDE", "PANCREATITIS", "age", "18-64", 1120, 2.7, 2.4, 2.0, 2.9),
+    subgroup("SEMAGLUTIDE", "PANCREATITIS", "age", "65+", 692, 2.7, 4.1, 3.3, 5.1),
+    // TIRZEPATIDE · GASTROPARESIS — strong female concentration.
+    subgroup("TIRZEPATIDE", "GASTROPARESIS", "sex", "female", 392, 5.6, 7.4, 5.9, 9.3),
+    subgroup("TIRZEPATIDE", "GASTROPARESIS", "sex", "male", 196, 5.6, 3.6, 2.6, 5.0),
+    subgroup("TIRZEPATIDE", "GASTROPARESIS", "age", "18-64", 470, 5.6, 5.9, 4.7, 7.4),
+    subgroup("TIRZEPATIDE", "GASTROPARESIS", "age", "65+", 118, 5.6, 4.8, 3.2, 7.2),
+    // INSULIN GLARGINE · HYPOGLYCAEMIA — concentrated in 65+.
+    subgroup("INSULIN GLARGINE", "HYPOGLYCAEMIA", "sex", "female", 12010, 6.8, 6.5, 6.0, 7.0),
+    subgroup("INSULIN GLARGINE", "HYPOGLYCAEMIA", "sex", "male", 12500, 6.8, 7.1, 6.6, 7.7),
+    subgroup("INSULIN GLARGINE", "HYPOGLYCAEMIA", "age", "18-64", 13200, 6.8, 5.9, 5.5, 6.3),
+    subgroup("INSULIN GLARGINE", "HYPOGLYCAEMIA", "age", "65+", 11310, 6.8, 8.7, 8.0, 9.5),
+  ],
+  drug_label_flags: [
+    label("SEMAGLUTIDE", "NAUSEA", true, "Adverse Reactions"),
+    label("SEMAGLUTIDE", "VOMITING", true, "Adverse Reactions"),
+    label("SEMAGLUTIDE", "PANCREATITIS", true, "Warnings and Precautions"),
+    label("SEMAGLUTIDE", "ILEUS", false, null), // novel — postmarketing signal not in label
+    label("TIRZEPATIDE", "NAUSEA", true, "Adverse Reactions"),
+    label("TIRZEPATIDE", "VOMITING", true, "Adverse Reactions"),
+    label("TIRZEPATIDE", "GASTROPARESIS", false, null), // novel
+    label("LIRAGLUTIDE", "PANCREATITIS", true, "Warnings and Precautions"),
+    label("DULAGLUTIDE", "CHONDRITIS", false, null), // novel (low signal)
+    label("EXENATIDE", "HYPOGLYCAEMIA", true, "Adverse Reactions"),
+    label("METFORMIN", "LACTIC ACIDOSIS", true, "Boxed Warning"),
+    label("INSULIN GLARGINE", "HYPOGLYCAEMIA", true, "Warnings and Precautions"),
   ],
 };

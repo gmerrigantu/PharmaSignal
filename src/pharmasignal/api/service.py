@@ -56,9 +56,27 @@ _DASHBOARD_COLUMNS: dict[str, list[str]] = {
     "data_quality_checks": ["table", "check", "category", "status", "detail"],
 }
 
-# Optional advanced marts — present on the cloud lakehouse, absent from the bundled
-# demo dataset. Endpoints that serve them degrade gracefully to ``[]``.
-_OPTIONAL_TABLES = ("interaction_signals", "subgroup_signals", "drug_label_flags")
+# Advanced marts — present on the cloud lakehouse, may be absent from a minimal
+# lakehouse. Surfaced in the dashboard payload and via dedicated endpoints; both
+# degrade gracefully to ``[]``. Kept in lock-step with the frontend's lib/types.ts.
+_OPTIONAL_COLUMNS: dict[str, list[str]] = {
+    "interaction_signals": [
+        "drug_a", "drug_b", "adverse_event", "co_reports", "pair_event_reports",
+        "ror_combination", "ror_ci_lower", "ror_ci_upper", "prr_combination",
+        "chi_square", "ror_drug_a", "ror_drug_b", "single_max_ror", "comparable",
+        "interaction_ratio", "interaction_flag",
+    ],
+    "subgroup_signals": [
+        "drug_name_normalized", "drug_class", "adverse_event", "subgroup_type",
+        "subgroup", "stratum_reports", "stratum_population", "ror", "ror_ci_lower",
+        "ror_ci_upper", "prr", "chi_square", "overall_ror",
+    ],
+    "drug_label_flags": [
+        "drug_name_normalized", "adverse_event", "labeled_event", "label_section",
+        "label_found", "label_status", "novel_flag",
+    ],
+}
+_OPTIONAL_TABLES = tuple(_OPTIONAL_COLUMNS)
 
 _CACHE_TTL = float(os.getenv("PHARMASIGNAL_CACHE_TTL", "300"))
 _cache: dict[str, tuple[float, pd.DataFrame | None]] = {}
@@ -107,6 +125,8 @@ def dashboard_summary() -> dict:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "data_source": data_source(),
         **{name: _records(_load(name), cols) for name, cols in _DASHBOARD_COLUMNS.items()},
+        # Advanced marts embedded for the frontend (empty list when not materialized).
+        **{name: _records(_load(name), cols) for name, cols in _OPTIONAL_COLUMNS.items()},
     }
 
 
@@ -179,7 +199,7 @@ def optional_table(name: str, *, drug: str | None = None) -> list[dict]:
         col = "drug_name_normalized" if "drug_name_normalized" in df.columns else None
         if col:
             df = df[df[col].astype(str).str.upper() == drug.upper()]
-    return _records(df)
+    return _records(df, _OPTIONAL_COLUMNS.get(name))
 
 
 def health() -> dict:

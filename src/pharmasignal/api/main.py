@@ -46,6 +46,7 @@ def root() -> dict:
         "endpoints": [
             "/health", "/dashboard/summary", "/signals", "/emerging",
             "/drugs/{drug}", "/nhanes", "/evidence", "/interactions", "/subgroups",
+            "/label-flags",
         ],
         "disclaimer": "Hypothesis-generating safety signals from public FAERS/openFDA "
                       "data. Not medical advice; not causal evidence.",
@@ -110,6 +111,12 @@ def interactions(drug: str | None = Query(None)) -> list[dict]:
 @app.get("/subgroups")
 def subgroups(drug: str | None = Query(None)) -> list[dict]:
     return service.optional_table("subgroup_signals", drug=drug)
+
+
+@app.get("/label-flags")
+def label_flags(drug: str | None = Query(None)) -> list[dict]:
+    """Labeled-vs-novel status per drug-event pair (drug_label_flags mart)."""
+    return service.optional_table("drug_label_flags", drug=drug)
 
 
 # AWS Lambda entry point. Imported lazily-tolerant: uvicorn/local dev never needs it,
