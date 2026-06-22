@@ -21,9 +21,11 @@ import pandas as pd
 from ..config import SignalThresholds
 
 # Rows in the precomputed scatter sample served in /dashboard/summary. The full matrix is
-# unbounded and paged via /signals; this tiny top-by-ROR slice lets the dashboard's scatter
-# render and keeps the summary's hot path free of a full-matrix sort (fast cold starts).
+# unbounded and paged via /signals; this representative slice lets the dashboard's scatter
+# render the overall landscape and keeps the summary's hot path free of a full-matrix sort.
 SCATTER_SAMPLE_ROWS = int(os.getenv("PHARMASIGNAL_SCATTER_SAMPLE", "3000"))
+# Deterministic seed so the sample is stable across rebuilds (offline-reproducible).
+SCATTER_SAMPLE_SEED = int(os.getenv("PHARMASIGNAL_SCATTER_SEED", "17"))
 from ..modeling import ebgm as eb
 from ..modeling import signal_scores as ss
 
@@ -92,16 +94,30 @@ def score_pairs(pairs: pd.DataFrame, n_cases: int,
     return out
 
 
-def scatter_sample(scores_all: pd.DataFrame, *, n: int = SCATTER_SAMPLE_ROWS) -> pd.DataFrame:
-    """Top-``n`` pairs by ROR — the small slice the dashboard scatter renders.
+def scatter_sample(scores_all: pd.DataFrame, *, n: int = SCATTER_SAMPLE_ROWS,
+                   seed: int = SCATTER_SAMPLE_SEED) -> pd.DataFrame:
+    """A representative ``n``-row sample of the matrix for the dashboard scatter.
 
-    Precomputed at build time and written as ``signal_scores_sample`` so the serving API
-    never sorts the full matrix on a request (which would blow the API-Gateway cold-start
-    budget). The complete matrix remains fully reachable via paginated ``/signals``.
+    Stratified across ROR deciles (equal draw per decile) so the scatter shows the whole
+    disproportionality landscape — low, middle, and the high-ROR tail — rather than only
+    the extremes (a top-N) or a low-ROR blob (a naive uniform sample). Precomputed at build
+    time as ``signal_scores_sample`` so the serving API never sorts the full matrix on a
+    request. The complete matrix stays fully reachable via paginated ``/signals``.
     """
-    if scores_all.empty:
-        return scores_all.copy()
-    return scores_all.nlargest(n, "ror").reset_index(drop=True)
+    if scores_all.empty or len(scores_all) <= n:
+        return scores_all.reset_index(drop=True)
+    df = scores_all.reset_index(drop=True)
+    # Rank-based deciles avoid degenerate bins when ROR has many ties / inf values.
+    ranked = df["ror"].rank(method="first", na_option="bottom")
+    deciles = pd.qcut(ranked, q=10, labels=False)
+    per = max(1, n // 10)
+    picks = [g.sample(min(len(g), per), random_state=seed) for _, g in df.groupby(deciles)]
+    out = pd.concat(picks)
+    if len(out) < n:  # top up to n with a random draw from the remainder
+        rest = df.drop(out.index)
+        out = pd.concat([out, rest.sample(min(len(rest), n - len(out)), random_state=seed)])
+    # Shuffle so render order isn't decile-ordered (avoids draw-order artifacts in the plot).
+    return out.sample(frac=1, random_state=seed).reset_index(drop=True)
 
 
 def summary_stats(scores_all: pd.DataFrame) -> pd.DataFrame:
