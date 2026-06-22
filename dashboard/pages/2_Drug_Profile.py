@@ -18,7 +18,11 @@ drugs = sorted(scores["drug_name_normalized"].unique().tolist())
 drug = st.selectbox("Drug", drugs)
 
 d = scores[scores["drug_name_normalized"] == drug].copy()
-cls = d["drug_class"].iloc[0] if not d.empty else "—"
+# Whole-database signals have no curated class (drug_class is null until RxNorm/ATC
+# enrichment runs); show a placeholder rather than "None".
+if "seriousness_rate" not in d.columns:
+    d["seriousness_rate"] = 0.0
+cls = (d["drug_class"].iloc[0] if not d.empty else None) or "(unclassified)"
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Drug class", cls)

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Bar,
   BarChart,
@@ -92,42 +92,168 @@ function EmergingTooltip({ active, payload }: { active?: boolean; payload?: Arra
   );
 }
 
+/* ----------------------------------------------------------- pan + zoom for scatter charts */
+type Domain = [number, number];
+type Extent = { x: Domain; y: Domain };
+// Approx plotting-area insets (chart margins + Y-axis width / X-axis label band), used to
+// map cursor pixels to data coordinates. Small errors only nudge the zoom anchor slightly.
+const PLOT_INSET = { left: 56, right: 20, top: 16, bottom: 44 };
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+/** Scroll-to-zoom (anchored at the cursor) + drag-to-pan over a Recharts number/number chart.
+ *  Returns axis domains to feed XAxis/YAxis (with allowDataOverflow) plus DOM handlers. */
+function usePanZoom(ext: Extent) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [view, setView] = useState<Extent | null>(null);
+  const drag = useRef<{ px: number; py: number; dom: Extent } | null>(null);
+  const raf = useRef<number | null>(null);
+  const pending = useRef<Extent | null>(null);
+
+  const x = view ? view.x : ext.x;
+  const y = view ? view.y : ext.y;
+
+  // Batch domain updates to one per animation frame so panning thousands of points stays smooth.
+  const apply = (v: Extent) => {
+    pending.current = v;
+    if (raf.current == null) {
+      raf.current = requestAnimationFrame(() => {
+        raf.current = null;
+        if (pending.current) setView(pending.current);
+      });
+    }
+  };
+  useEffect(() => () => { if (raf.current != null) cancelAnimationFrame(raf.current); }, []);
+
+  const plot = () => {
+    const r = ref.current!.getBoundingClientRect();
+    return {
+      l: r.left + PLOT_INSET.left, t: r.top + PLOT_INSET.top,
+      w: Math.max(1, r.width - PLOT_INSET.left - PLOT_INSET.right),
+      h: Math.max(1, r.height - PLOT_INSET.top - PLOT_INSET.bottom),
+    };
+  };
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const pr = plot();
+      const cx = view ? view.x : ext.x;
+      const cy = view ? view.y : ext.y;
+      const fx = clamp((e.clientX - pr.l) / pr.w, 0, 1);
+      const fy = clamp((e.clientY - pr.t) / pr.h, 0, 1);
+      const ax = cx[0] + fx * (cx[1] - cx[0]);          // data x under cursor
+      const ay = cy[1] - fy * (cy[1] - cy[0]);          // data y under cursor (screen y inverted)
+      const k = e.deltaY < 0 ? 0.85 : 1 / 0.85;         // wheel up = zoom in
+      const fullX = ext.x[1] - ext.x[0] || 1;
+      const fullY = ext.y[1] - ext.y[0] || 1;
+      const xs = clamp((cx[1] - cx[0]) * k, fullX / 500, fullX);
+      const ys = clamp((cy[1] - cy[0]) * k, fullY / 500, fullY);
+      apply({ x: [ax - fx * xs, ax + (1 - fx) * xs], y: [ay - (1 - fy) * ys, ay + fy * ys] });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [view, ext]);
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    drag.current = { px: e.clientX, py: e.clientY, dom: { x, y } };
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    const pr = plot();
+    const dx = ((e.clientX - d.px) / pr.w) * (d.dom.x[1] - d.dom.x[0]);
+    const dy = ((e.clientY - d.py) / pr.h) * (d.dom.y[1] - d.dom.y[0]);
+    apply({ x: [d.dom.x[0] - dx, d.dom.x[1] - dx], y: [d.dom.y[0] + dy, d.dom.y[1] + dy] });
+  };
+  const onPointerUp = () => { drag.current = null; };
+
+  return { ref, xDomain: x, yDomain: y, zoomed: view != null, reset: () => setView(null),
+           onPointerDown, onPointerMove, onPointerUp };
+}
+
 /* ----------------------------------------------------------- Overview: volcano-style scatter */
 export function SignalScatter({ rows }: { rows: SignalScore[] }) {
   const p = useChartPalette();
-  const data = rows.map((r) => ({ ...r, logRor: Math.log10(Math.max(r.ror, 0.01)) }));
+  const data = useMemo(
+    () => rows.map((r) => ({ ...r, logRor: Math.log10(Math.max(r.ror, 0.01)) })),
+    [rows],
+  );
+  const ext = useMemo<Extent>(() => {
+    if (!data.length) return { x: [-1, 1], y: [0, 1] };
+    const xs = data.map((d) => d.logRor);
+    const ys = data.map((d) => d.a_drug_event);
+    const xmin = Math.min(...xs), xmax = Math.max(...xs), ymax = Math.max(...ys);
+    const xpad = (xmax - xmin || 1) * 0.05, ypad = (ymax || 1) * 0.05;
+    return { x: [xmin - xpad, xmax + xpad], y: [0, ymax + ypad] };
+  }, [data]);
+  const pz = usePanZoom(ext);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   return (
-    <ClientChart>
-      <ScatterChart margin={{ top: 16, right: 20, bottom: 28, left: 8 }}>
-        <CartesianGrid stroke={p.grid} strokeDasharray="2 4" />
-        <XAxis
-          type="number"
-          dataKey="logRor"
-          stroke={p.axis}
-          tickLine={false}
-          axisLine={{ stroke: p.grid }}
-          tickFormatter={(v) => `${Math.pow(10, Number(v)).toFixed(1)}×`}
-          label={{ value: "Reporting odds ratio (log scale)", position: "insideBottom", offset: -14, fill: p.axis, fontSize: 11 }}
-        />
-        <YAxis
-          type="number"
-          dataKey="a_drug_event"
-          stroke={p.axis}
-          tickLine={false}
-          axisLine={{ stroke: p.grid }}
-          tickFormatter={(v) => compactNumber(Number(v))}
-          width={48}
-        />
-        <ZAxis dataKey="seriousness_rate" range={[60, 460]} />
-        <ReferenceLine x={0} stroke={p.muted} strokeDasharray="3 3" />
-        <Tooltip content={<SignalTooltip />} cursor={{ strokeDasharray: "3 3", stroke: p.muted }} />
-        <Scatter data={data} isAnimationActive={false}>
-          {data.map((e) => (
-            <Cell key={key(e)} fill={e.disproportionality_flag ? p.flagged : p.blue} fillOpacity={0.78} />
-          ))}
-        </Scatter>
-      </ScatterChart>
-    </ClientChart>
+    <div
+      className="chart-wrap"
+      ref={pz.ref}
+      style={{ position: "relative", touchAction: "none", cursor: "grab" }}
+      onPointerDown={pz.onPointerDown}
+      onPointerMove={pz.onPointerMove}
+      onPointerUp={pz.onPointerUp}
+      onPointerLeave={pz.onPointerUp}
+    >
+      <span style={{ position: "absolute", top: 6, left: 10, fontSize: 10, opacity: 0.55, pointerEvents: "none", zIndex: 2 }}>
+        scroll to zoom · drag to pan
+      </span>
+      {pz.zoomed && (
+        <button
+          type="button"
+          onClick={pz.reset}
+          style={{ position: "absolute", top: 4, right: 6, zIndex: 2, fontSize: 11, padding: "2px 8px",
+                   borderRadius: 6, cursor: "pointer", border: `1px solid ${p.grid}`, background: "transparent", color: p.axis }}
+        >
+          Reset view
+        </button>
+      )}
+      {mounted && (
+        <ResponsiveContainer>
+          <ScatterChart margin={{ top: 16, right: 20, bottom: 28, left: 8 }}>
+            <CartesianGrid stroke={p.grid} strokeDasharray="2 4" />
+            <XAxis
+              type="number"
+              dataKey="logRor"
+              domain={pz.zoomed ? pz.xDomain : undefined}
+              allowDataOverflow={pz.zoomed}
+              stroke={p.axis}
+              tickLine={false}
+              axisLine={{ stroke: p.grid }}
+              tickFormatter={(v) => `${Math.pow(10, Number(v)).toFixed(1)}×`}
+              label={{ value: "Reporting odds ratio (log scale)", position: "insideBottom", offset: -14, fill: p.axis, fontSize: 11 }}
+            />
+            <YAxis
+              type="number"
+              dataKey="a_drug_event"
+              domain={pz.zoomed ? pz.yDomain : undefined}
+              allowDataOverflow={pz.zoomed}
+              stroke={p.axis}
+              tickLine={false}
+              axisLine={{ stroke: p.grid }}
+              tickFormatter={(v) => compactNumber(Number(v))}
+              width={48}
+            />
+            <ZAxis dataKey="seriousness_rate" range={[60, 460]} />
+            <ReferenceLine x={0} stroke={p.muted} strokeDasharray="3 3" />
+            <Tooltip content={<SignalTooltip />} cursor={{ strokeDasharray: "3 3", stroke: p.muted }} />
+            <Scatter data={data} isAnimationActive={false}>
+              {data.map((e) => (
+                <Cell key={key(e)} fill={e.disproportionality_flag ? p.flagged : p.blue} fillOpacity={0.78} />
+              ))}
+            </Scatter>
+          </ScatterChart>
+        </ResponsiveContainer>
+      )}
+    </div>
   );
 }
 

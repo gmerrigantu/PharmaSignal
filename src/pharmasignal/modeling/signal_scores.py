@@ -183,6 +183,73 @@ def is_signal(
 
 
 # --------------------------------------------------------------------------- #
+# Vectorized disproportionality (whole-database scale, requirements §9 / WS2)
+# --------------------------------------------------------------------------- #
+def disproportionality_frame(
+    a, b, c, d, *, prior_strength: float = 0.5
+):
+    """Vectorized counterpart of :func:`disproportionality` over array-like cells.
+
+    Computes ROR/PRR/CI/chi-square/expected/shrinkage for *millions* of pairs at once
+    using numpy, instead of looping :class:`Contingency` per pair. ``a, b, c, d`` are
+    array-likes (e.g. DataFrame columns) of the 2x2 cells. Returns a dict of numpy
+    arrays with the same keys the scalar path writes to ``signal_scores`` gold.
+
+    The maths is identical to the scalar functions above — Haldane-Anscombe 0.5
+    continuity correction applied row-wise wherever any cell is zero — so the two paths
+    agree to floating point (covered in tests).
+    """
+    import numpy as np
+
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    c = np.asarray(c, dtype=float)
+    d = np.asarray(d, dtype=float)
+
+    needs_cc = (a == 0) | (b == 0) | (c == 0) | (d == 0)
+    ac = np.where(needs_cc, a + 0.5, a)
+    bc = np.where(needs_cc, b + 0.5, b)
+    cc = np.where(needs_cc, c + 0.5, c)
+    dc = np.where(needs_cc, d + 0.5, d)
+
+    ror = (ac * dc) / (bc * cc)
+    se = np.sqrt(1 / ac + 1 / bc + 1 / cc + 1 / dc)
+    log_ror = np.log(ror)
+    ror_lo = np.exp(log_ror - Z_95 * se)
+    ror_hi = np.exp(log_ror + Z_95 * se)
+
+    prr = (ac / (ac + bc)) / (cc / (cc + dc))
+
+    # Yates chi-square uses the *raw* (uncorrected) cells, matching chi_square_yates.
+    n = a + b + c + d
+    row1, row2 = a + b, c + d
+    col1, col2 = a + c, b + d
+    denom = row1 * row2 * col1 * col2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        chi = n * (np.abs(a * d - b * c) - n / 2) ** 2 / denom
+    chi = np.where((denom == 0) | (n == 0), 0.0, chi)
+    chi = np.maximum(chi, 0.0)
+
+    expected = np.where(n > 0, (row1 * col1) / n, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        oe = np.where(expected > 0, a / expected, np.nan)
+        weight = np.where(a > 0, a / (a + prior_strength), 0.0)
+        shrunken = np.where((expected > 0) & (a > 0), weight * np.log(a / expected), 0.0)
+
+    return {
+        "ror": ror,
+        "ror_ci_lower": ror_lo,
+        "ror_ci_upper": ror_hi,
+        "prr": prr,
+        "chi_square": chi,
+        "expected_count": expected,
+        "oe_ratio": oe,
+        "bayesian_shrunken_score": shrunken,
+        "continuity_correction": needs_cc,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Time-series anomaly detection (requirements §9.5)
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)

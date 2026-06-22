@@ -5,6 +5,7 @@ pyarrow>=14.0          # Parquet read/write
 duckdb>=0.10           # query-on-demand over Parquet (local lakehouse)
 fsspec>=2024.0         # unified local/S3 filesystem access
 numpy>=1.26
+scipy>=1.11            # gamma-Poisson MLE + posterior quantiles for EBGM/MGPS
 PyYAML>=6.0
 requests>=2.31
 

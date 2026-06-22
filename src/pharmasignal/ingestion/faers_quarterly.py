@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 
+from .. import config
 from ..paths import BRONZE_DIR, SILVER_DIR
 from ..transforms.normalize import normalize_drug, normalize_reaction
 
@@ -34,13 +35,34 @@ FILE_TEMPLATE = "faers_ascii_{year}Q{q}.zip"
 DEMO_COLUMNS = {
     "primaryid": "primaryid",
     "caseid": "caseid",
+    "caseversion": "case_version",
+    "fda_dt": "fda_date",          # FDA receipt date -> drives case-version dedup
     "event_dt": "event_date",
     "rept_dt": "receive_date",
     "sex": "patient_sex",
+    "gndr_cod": "patient_sex",     # some FAERS years use gndr_cod instead of sex
     "age": "patient_age",
     "age_cod": "patient_age_unit",
     "reporter_country": "reporter_country",
     "occr_country": "reporter_country",
+}
+
+# THER (drug therapy dates -> time-to-onset) and RPSR (report source -> consumer vs
+# healthcare-professional vs literature) were missing from the original ingester; the
+# upgrade plan (WS1 §4) requires both.
+THER_COLUMNS = {
+    "primaryid": "primaryid",
+    "caseid": "caseid",
+    "dsg_drug_seq": "drug_seq",
+    "start_dt": "therapy_start_date",
+    "end_dt": "therapy_end_date",
+    "dur": "therapy_duration",
+    "dur_cod": "therapy_duration_unit",
+}
+RPSR_COLUMNS = {
+    "primaryid": "primaryid",
+    "caseid": "caseid",
+    "rpsr_cod": "report_source_code",
 }
 
 
@@ -122,6 +144,9 @@ def build_silver_from_quarter(ref: QuarterRef) -> dict[str, int]:
         reac = _read_ascii_table(zf, "REAC", ref)
         outc = _read_ascii_table(zf, "OUTC", ref)
         indi = _read_ascii_table(zf, "INDI", ref)
+        ther = _read_ascii_table(zf, "THER", ref)
+        rpsr = _read_ascii_table(zf, "RPSR", ref)
+        deleted_ids = _read_deleted_cases(zf)
 
     part = SILVER_DIR / "faers"
     # --- reports ---
@@ -130,6 +155,7 @@ def build_silver_from_quarter(ref: QuarterRef) -> dict[str, int]:
         demo["faers_quarter"] = ref.label
         demo["event_date"] = pd.to_datetime(demo.get("event_date"), format="%Y%m%d", errors="coerce")
         demo["receive_date"] = pd.to_datetime(demo.get("receive_date"), format="%Y%m%d", errors="coerce")
+        demo["fda_date"] = pd.to_datetime(demo.get("fda_date"), format="%Y%m%d", errors="coerce")
         demo["ingest_timestamp"] = datetime.now(timezone.utc)
         _write_partition(demo, part / "reports", ref)
         counts["reports"] = len(demo)
@@ -156,6 +182,19 @@ def build_silver_from_quarter(ref: QuarterRef) -> dict[str, int]:
         _write_partition(reac, part / "reactions", ref)
         counts["reactions"] = len(reac)
 
+    # --- therapy dates + report source (renamed for stable downstream joins) ---
+    if not ther.empty:
+        ther = ther.rename(columns={k: v for k, v in THER_COLUMNS.items() if k in ther.columns})
+        ther["faers_quarter"] = ref.label
+        _write_partition(ther, part / "therapies", ref)
+        counts["therapies"] = len(ther)
+
+    if not rpsr.empty:
+        rpsr = rpsr.rename(columns={k: v for k, v in RPSR_COLUMNS.items() if k in rpsr.columns})
+        rpsr["faers_quarter"] = ref.label
+        _write_partition(rpsr, part / "report_sources", ref)
+        counts["report_sources"] = len(rpsr)
+
     for name, frame in (("outcomes", outc), ("indications", indi)):
         if not frame.empty:
             frame = frame.copy()
@@ -163,7 +202,34 @@ def build_silver_from_quarter(ref: QuarterRef) -> dict[str, int]:
             _write_partition(frame, part / name, ref)
             counts[name] = len(frame)
 
+    # --- deleted cases (FDA ships a list of superseded caseids each quarter) ---
+    if deleted_ids:
+        deleted_df = pd.DataFrame({"caseid": deleted_ids})
+        deleted_df["faers_quarter"] = ref.label
+        _write_partition(deleted_df, part / "deleted_cases", ref)
+        counts["deleted_cases"] = len(deleted_df)
+
     return counts
+
+
+def _read_deleted_cases(zf: zipfile.ZipFile) -> list[str]:
+    """Return the list of caseids FDA marked deleted in this quarter's extract.
+
+    FDA ships these in the ``deleted/`` folder of the ASCII ZIP, one caseid per line
+    (filenames vary by quarter, e.g. ``ADR..DELETED..txt``), so we match by path.
+    """
+    names = [
+        n for n in zf.namelist()
+        if "delet" in n.lower() and n.lower().endswith(".txt")
+    ]
+    ids: list[str] = []
+    for name in names:
+        with zf.open(name) as fh:
+            for raw_line in io.TextIOWrapper(fh, encoding="latin-1"):
+                token = raw_line.strip().split("$")[0].strip()
+                if token and token.lower() != "caseid":
+                    ids.append(token)
+    return ids
 
 
 def _write_partition(df: pd.DataFrame, base, ref: QuarterRef) -> None:
@@ -172,15 +238,39 @@ def _write_partition(df: pd.DataFrame, base, ref: QuarterRef) -> None:
     df.to_parquet(out / "data.parquet", index=False)
 
 
+def expand_quarters(tokens: list[str]) -> list[QuarterRef]:
+    """Expand CLI quarter tokens, supporting inclusive ranges with ``..``.
+
+    Accepts individual quarters ("2023q4") and ranges ("2021q1..2023q4"), in any mix.
+    """
+    refs: list[QuarterRef] = []
+    for token in tokens:
+        if ".." in token:
+            lo_s, hi_s = token.split("..", 1)
+            lo, hi = QuarterRef.parse(lo_s), QuarterRef.parse(hi_s)
+            y, q = lo.year, lo.quarter
+            while (y, q) <= (hi.year, hi.quarter):
+                refs.append(QuarterRef(year=y, quarter=q))
+                q += 1
+                if q > 4:
+                    q, y = 1, y + 1
+        else:
+            refs.append(QuarterRef.parse(token))
+    return refs
+
+
 def main(argv: list[str] | None = None) -> None:
     import sys
 
     args = argv if argv is not None else sys.argv[1:]
     if not args:
-        print("usage: python -m pharmasignal.ingestion.faers_quarterly <YYYYqQ> [<YYYYqQ> ...]")
+        # Fall back to the quarters listed in config when called with no args.
+        args = list(config.load_faers_config().get("quarters", []))
+    if not args:
+        print("usage: python -m pharmasignal.ingestion.faers_quarterly "
+              "<YYYYqQ | YYYYqQ..YYYYqQ> [...]")
         return
-    for token in args:
-        ref = QuarterRef.parse(token)
+    for ref in expand_quarters(args):
         print(f"Ingesting FAERS {ref.label} ...")
         summary = build_silver_from_quarter(ref)
         print(f"  -> {summary}")

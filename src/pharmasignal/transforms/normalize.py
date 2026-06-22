@@ -6,6 +6,7 @@ the normalization *method* / *confidence* is tracked.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 
@@ -24,11 +25,13 @@ _NOISE_PATTERNS = [
 @dataclass(frozen=True)
 class NormalizedDrug:
     raw: str
-    normalized: str            # canonical name if matched, else cleaned raw
+    normalized: str            # canonical/ingredient if matched, else cleaned raw
     canonical: str | None      # canonical name when confidently matched
     drug_class: str | None
-    method: str                # exact_dictionary | cleaned_unmatched | unknown
-    confidence: str            # high | low | unknown
+    method: str                # exact_dictionary | rxnorm_* | cleaned_unmatched | unknown
+    confidence: str            # high | medium | low | unknown
+    rxcui: str | None = None   # RxNorm ingredient RxCUI (when resolved, WS3)
+    ingredient: str | None = None
 
 
 def clean_drug_string(raw: str) -> str:
@@ -61,6 +64,26 @@ def normalize_drug(raw: str) -> NormalizedDrug:
             method="exact_dictionary",
             confidence="high",
         )
+
+    # Tier 2 (optional, WS3): RxNorm REST resolver, gated behind PHARMASIGNAL_RXNORM
+    # so the default path stays offline/deterministic. Lookups are cached in bronze.
+    if cleaned and os.getenv("PHARMASIGNAL_RXNORM"):
+        from .rxnorm import resolve as resolve_rxnorm
+
+        match = resolve_rxnorm(cleaned)
+        if match.rxcui is not None:
+            ingredient = match.ingredient or cleaned
+            return NormalizedDrug(
+                raw=raw,
+                normalized=(match.ingredient or cleaned).upper(),
+                canonical=None,
+                drug_class=None,
+                method=match.method,
+                confidence=match.confidence,
+                rxcui=match.ingredient_rxcui or match.rxcui,
+                ingredient=ingredient,
+            )
+
     if cleaned:
         return NormalizedDrug(
             raw=raw,

@@ -18,6 +18,8 @@ events = sorted(scores["adverse_event"].unique().tolist())
 event = st.selectbox("Adverse event", events, index=events.index("PANCREATITIS") if "PANCREATITIS" in events else 0)
 
 e = scores[scores["adverse_event"] == event].copy()
+if "seriousness_rate" not in e.columns:
+    e["seriousness_rate"] = 0.0
 c1, c2, c3 = st.columns(3)
 c1.metric("Drugs reporting this event", f"{e['drug_name_normalized'].nunique():,}")
 c2.metric("Total reports", f"{int(e['a_drug_event'].sum()):,}")

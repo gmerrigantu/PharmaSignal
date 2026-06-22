@@ -41,10 +41,18 @@ with st.sidebar:
              "labeling. 'Novel' + disproportionate is the most interesting case — but a "
              "text-match heuristic, not a regulatory claim.",
     )
+    # EBGM/EB05 are present only in the whole-database (bulk) build; offer them to
+    # rank by when available, since EB05 is the regulatory-grade signalling metric.
+    has_ebgm = "ebgm" in scores.columns and "eb05" in scores.columns
+    sort_options = ["ror", "prr", "a_drug_event", "seriousness_rate", "chi_square",
+                    "bayesian_shrunken_score"]
+    if has_ebgm:
+        sort_options = ["eb05", "ebgm"] + sort_options
     sort_by = st.selectbox(
         "Sort by",
-        ["ror", "prr", "a_drug_event", "seriousness_rate", "chi_square", "bayesian_shrunken_score"],
+        sort_options,
         format_func=lambda c: {
+            "eb05": "EB05 (EBGM lower bound)", "ebgm": "EBGM",
             "ror": "ROR", "prr": "PRR", "a_drug_event": "Report count",
             "seriousness_rate": "Seriousness rate", "chi_square": "Chi-square",
             "bayesian_shrunken_score": "Shrinkage score",
@@ -72,18 +80,25 @@ st.caption(
 )
 
 show = df.sort_values(sort_by, ascending=False).copy()
-for col in ["ror", "ror_ci_lower", "ror_ci_upper", "prr", "chi_square", "bayesian_shrunken_score"]:
-    show[col] = show[col].map(lib.fmt)
-show["seriousness_rate"] = (df.sort_values(sort_by, ascending=False)["seriousness_rate"] * 100).map(lambda v: f"{v:.0f}%")
+for col in ["ror", "ror_ci_lower", "ror_ci_upper", "prr", "chi_square",
+            "bayesian_shrunken_score", "ebgm", "eb05"]:
+    if col in show.columns:
+        show[col] = show[col].map(lib.fmt)
+if "seriousness_rate" in show.columns:
+    show["seriousness_rate"] = (df.sort_values(sort_by, ascending=False)["seriousness_rate"] * 100).map(lambda v: f"{v:.0f}%")
 _badge = {"novel": "🆕 novel", "labeled": "📋 labeled", "unknown": "❓ unknown"}
 show["label_status"] = show["label_status"].map(lambda s: _badge.get(s, s))
 cols = {
     "drug_name_normalized": "Drug", "adverse_event": "Adverse event", "drug_class": "Class",
-    "a_drug_event": "Reports (a)", "ror": "ROR", "ror_ci_lower": "ROR CI low",
+    "a_drug_event": "Reports (a)",
+    "ebgm": "EBGM", "eb05": "EB05",
+    "ror": "ROR", "ror_ci_lower": "ROR CI low",
     "ror_ci_upper": "ROR CI high", "prr": "PRR", "chi_square": "χ²",
     "seriousness_rate": "Serious", "label_status": "Label", "bayesian_shrunken_score": "Shrink",
     "disproportionality_flag": "Flag",
 }
+# Only show columns that exist in this build (API-mode lacks EBGM/seriousness).
+cols = {k: v for k, v in cols.items() if k in show.columns}
 st.dataframe(show[list(cols)].rename(columns=cols), hide_index=True, width="stretch", height=460)
 st.caption(
     "**Label** = whether the event already appears in the drug's official openFDA labeling "

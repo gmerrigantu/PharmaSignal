@@ -9,6 +9,7 @@ __pycache__/
 data/bronze/
 data/silver/
 data/gold/
+data/_tmp/
 !data/**/.gitkeep
 
 # Secrets — NEVER commit credentials or API keys
@@ -22,6 +23,10 @@ secrets.*
 *.pem
 *.key
 .aws/
+
+# Spark backfill build artifacts + orchestrator state (regenerated; may be large)
+build/
+infrastructure/.spark_backfill.json
 
 # Node / Next.js frontend
 node_modules/
