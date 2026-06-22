@@ -18,12 +18,12 @@ import os
 
 import pandas as pd
 
-# The dashboard/API summary ships signal_scores as one JSON payload, which must stay
-# under the Lambda/API-Gateway response limit (~6 MB). So the *served* mart is capped to
-# the strongest top-N signals; the full matrix lives in signal_scores_all (Athena).
-DASHBOARD_MART_LIMIT = int(os.getenv("PHARMASIGNAL_DASHBOARD_LIMIT", "5000"))
-
 from ..config import SignalThresholds
+
+# Rows in the precomputed scatter sample served in /dashboard/summary. The full matrix is
+# unbounded and paged via /signals; this tiny top-by-ROR slice lets the dashboard's scatter
+# render and keeps the summary's hot path free of a full-matrix sort (fast cold starts).
+SCATTER_SAMPLE_ROWS = int(os.getenv("PHARMASIGNAL_SCATTER_SAMPLE", "3000"))
 from ..modeling import ebgm as eb
 from ..modeling import signal_scores as ss
 
@@ -92,22 +92,27 @@ def score_pairs(pairs: pd.DataFrame, n_cases: int,
     return out
 
 
-def served_mart(scores_all: pd.DataFrame, *, eb05_floor: float = 2.0,
-                limit: int | None = DASHBOARD_MART_LIMIT) -> pd.DataFrame:
-    """The small, dashboard-served slice: meets the min-count floor OR a robust EB05.
+def scatter_sample(scores_all: pd.DataFrame, *, n: int = SCATTER_SAMPLE_ROWS) -> pd.DataFrame:
+    """Top-``n`` pairs by ROR — the small slice the dashboard scatter renders.
 
-    Capped to the top ``limit`` rows by EB05 so the single-payload ``/dashboard/summary``
-    response stays under the serving limit. The complete matrix is written separately as
-    ``signal_scores_all`` (for Athena / paginated drill-down). ``limit=None`` disables the
-    cap (e.g. when the full served set is wanted on disk).
+    Precomputed at build time and written as ``signal_scores_sample`` so the serving API
+    never sorts the full matrix on a request (which would blow the API-Gateway cold-start
+    budget). The complete matrix remains fully reachable via paginated ``/signals``.
     """
     if scores_all.empty:
         return scores_all.copy()
-    mask = (~scores_all["min_count_flag"]) | (scores_all["eb05"] >= eb05_floor)
-    served = scores_all[mask]
-    if limit is not None and len(served) > limit:
-        served = served.sort_values("eb05", ascending=False).head(limit)
-    return served.reset_index(drop=True)
+    return scores_all.nlargest(n, "ror").reset_index(drop=True)
+
+
+def summary_stats(scores_all: pd.DataFrame) -> pd.DataFrame:
+    """One-row mart of dashboard totals over the full matrix (``signal_scores_stats``).
+
+    Precomputed so ``/dashboard/summary`` reports true totals without scanning the full
+    Parquet on each request (which is too slow over S3 under the API-Gateway cold-start
+    budget). The complete matrix stays fully reachable via ``/signals``.
+    """
+    flagged = int(scores_all["disproportionality_flag"].sum()) if not scores_all.empty else 0
+    return pd.DataFrame([{"signal_total": int(len(scores_all)), "flagged_total": flagged}])
 
 
 def emerging_signals(trend: pd.DataFrame, scores_df: pd.DataFrame,

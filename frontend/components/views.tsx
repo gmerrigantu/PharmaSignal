@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowUpDown,
@@ -32,6 +32,7 @@ import {
   SignalScatter,
 } from "@/components/charts";
 import { Badge, Empty, Panel, Stat, type BadgeTone } from "@/components/ui";
+import { fetchSignalsPage } from "@/lib/api";
 import {
   compactNumber,
   fullNumber,
@@ -44,12 +45,14 @@ import type {
   DashboardData,
   DrugLabelFlag,
   EmergingSignal,
+  Filters,
   InteractionSignal,
   LiteratureArticle,
   NhanesContext,
   PriorityLevel,
   QualityCheck,
   SignalScore,
+  SignalsPage,
   SubgroupSignal,
 } from "@/lib/types";
 
@@ -93,7 +96,7 @@ export function Overview({
   onSelectSignal: (s: EmergingSignal) => void;
   onGoNovel: () => void;
 }) {
-  const flagged = data.signal_scores.filter((r) => r.disproportionality_flag).length;
+  const flagged = data.flagged_total;
   const high = data.emerging_signals.filter((r) => r.priority_level === "High").length;
   const latest = data.pipeline_health[0];
   const topMover = [...data.emerging_signals].sort(
@@ -104,7 +107,8 @@ export function Overview({
   const counts = { labeled: 0, novel: 0, unknown: 0 };
   labelFlags.forEach((f) => (counts[f.label_status] += 1));
   const labelTotal = labelFlags.length || 1;
-  const novelFlagged = data.signal_scores
+  // Novel-flagged signals shown in the label section, drawn from the bounded sample.
+  const novelFlagged = data.signal_sample
     .filter((s) => labelMap.get(pair(s))?.novel_flag)
     .sort((a, b) => b.ror - a.ror);
 
@@ -114,8 +118,8 @@ export function Overview({
         <Stat
           icon={Layers}
           label="Drug–event pairs"
-          value={fullNumber(data.signal_scores.length)}
-          foot={`${flagged} disproportionate`}
+          value={fullNumber(data.signal_total)}
+          foot={`${fullNumber(flagged)} disproportionate`}
         />
         <Stat
           icon={ShieldAlert}
@@ -253,21 +257,46 @@ export function Overview({
 /* ====================================================================== EXPLORER */
 type SortKey = "a_drug_event" | "ror" | "prr" | "chi_square" | "bayesian_shrunken_score" | "seriousness_rate";
 
-export function Explorer({ rows, labelMap }: { rows: SignalScore[]; labelMap: LabelMap }) {
+const PAGE_SIZE = 50;
+
+export function Explorer({ filters, labelMap }: { filters: Filters; labelMap: LabelMap }) {
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({
     key: "ror",
     dir: "desc",
   });
+  const [page, setPage] = useState<SignalsPage | null>(null);
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const hasLabels = labelMap.size > 0;
 
-  const sorted = useMemo(() => {
-    const s = [...rows].sort((a, b) => {
-      const av = a[sort.key] ?? 0;
-      const bv = b[sort.key] ?? 0;
-      return sort.dir === "desc" ? bv - av : av - bv;
-    });
-    return s;
-  }, [rows, sort]);
+  // Filters/sort changing returns us to the first page.
+  useEffect(() => {
+    setOffset(0);
+  }, [filters.drugClass, filters.minReports, filters.showFlaggedOnly, filters.query, sort.key, sort.dir]);
+
+  // Fetch the current page server-side (the full matrix is never loaded in the browser).
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetchSignalsPage({
+      drug_class: filters.drugClass !== "All" ? filters.drugClass : undefined,
+      min_reports: filters.minReports || undefined,
+      flagged_only: filters.showFlaggedOnly || undefined,
+      q: filters.query.trim() || undefined,
+      sort: sort.key,
+      desc: sort.dir === "desc",
+      offset,
+      limit: PAGE_SIZE,
+    })
+      .then((p) => !cancelled && setPage(p))
+      .catch((e) => !cancelled && setError(e instanceof Error ? e.message : "Failed to load signals"))
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [filters.drugClass, filters.minReports, filters.showFlaggedOnly, filters.query, sort.key, sort.dir, offset]);
 
   const toggle = (key: SortKey) =>
     setSort((p) => (p.key === key ? { key, dir: p.dir === "desc" ? "asc" : "desc" } : { key, dir: "desc" }));
@@ -281,15 +310,27 @@ export function Explorer({ rows, labelMap }: { rows: SignalScore[]; labelMap: La
     </th>
   );
 
+  const total = page?.total ?? 0;
+  // "Novel only" is a label-mart filter (client-side); apply it to the fetched page.
+  const rows = (page?.rows ?? []).filter(
+    (r) => !filters.showNovelOnly || labelMap.get(pair(r))?.novel_flag,
+  );
+  const pageStart = total ? offset + 1 : 0;
+  const pageEnd = offset + (page?.rows.length ?? 0);
+
   return (
     <Panel
       title="Signal explorer"
-      caption={`${fullNumber(rows.length)} drug–event pairs match the current filters. Click a column to sort.`}
+      caption={`${fullNumber(total)} drug–event pairs match the current filters. Click a column to sort; page through every result below.`}
     >
-      {rows.length ? (
+      {error ? (
+        <Empty icon={Inbox}>Couldn’t load signals: {error}</Empty>
+      ) : total === 0 && !loading ? (
+        <Empty icon={Inbox}>No drug–event pairs match the current filters.</Empty>
+      ) : (
         <>
-          <RorBars rows={sorted} />
-          <div className="table-wrap" style={{ marginTop: "1rem" }}>
+          <RorBars rows={rows} />
+          <div className="table-wrap" style={{ marginTop: "1rem", opacity: loading ? 0.55 : 1 }}>
             <table>
               <thead>
                 <tr>
@@ -307,7 +348,7 @@ export function Explorer({ rows, labelMap }: { rows: SignalScore[]; labelMap: La
                 </tr>
               </thead>
               <tbody>
-                {sorted.slice(0, 100).map((r) => (
+                {rows.map((r) => (
                   <tr key={pair(r)}>
                     <td className="drug-cell">{titleCase(r.drug_name_normalized)}</td>
                     <td>{titleCase(r.adverse_event)}</td>
@@ -335,9 +376,38 @@ export function Explorer({ rows, labelMap }: { rows: SignalScore[]; labelMap: La
               </tbody>
             </table>
           </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginTop: "0.9rem",
+              gap: "0.75rem",
+            }}
+          >
+            <span style={{ color: "var(--text-muted)", fontSize: "0.8rem" }}>
+              {loading
+                ? "Loading…"
+                : `Showing ${fullNumber(pageStart)}–${fullNumber(pageEnd)} of ${fullNumber(total)}`}
+            </span>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <button
+                className="button secondary"
+                disabled={offset <= 0 || loading}
+                onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+              >
+                Previous
+              </button>
+              <button
+                className="button secondary"
+                disabled={loading || pageEnd >= total}
+                onClick={() => setOffset((o) => o + PAGE_SIZE)}
+              >
+                Next
+              </button>
+            </div>
+          </div>
         </>
-      ) : (
-        <Empty icon={Inbox}>No drug–event pairs match the current filters.</Empty>
       )}
     </Panel>
   );
@@ -379,10 +449,10 @@ export function Profiles({
   setSelectedDrug: (d: string) => void;
   setSelectedEvent: (e: string) => void;
 }) {
-  const drugRows = data.signal_scores
+  const drugRows = data.signal_sample
     .filter((r) => r.drug_name_normalized === selectedDrug)
     .sort((a, b) => b.a_drug_event - a.a_drug_event);
-  const eventRows = data.signal_scores
+  const eventRows = data.signal_sample
     .filter((r) => r.adverse_event === selectedEvent)
     .sort((a, b) => b.ror - a.ror);
   const nhanes = data.nhanes_population_context.find((r) => r.medication_name_normalized === selectedDrug);

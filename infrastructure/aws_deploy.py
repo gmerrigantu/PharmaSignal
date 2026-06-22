@@ -30,11 +30,14 @@ from botocore.exceptions import ClientError
 GLUE_DB = "pharmasignal"
 ATHENA_WORKGROUP = "pharmasignal"
 GOLD_TABLES = [
-    "signal_scores", "signal_scores_all", "drug_event_counts", "emerging_signals", "drug_label_flags",
+    "signal_scores", "drug_event_counts", "emerging_signals", "drug_label_flags",
     "subgroup_signals", "interaction_signals",
     "nhanes_population_context", "pubmed_evidence", "pubmed_support_summary",
     "pipeline_health", "data_quality_checks",
 ]
+# Tables that USED to exist and must be dropped from Glue on register (schema retired).
+# signal_scores_all was folded into the now-full, unfiltered signal_scores.
+RETIRED_TABLES = ["signal_scores_all"]
 
 # pandas dtype -> Athena (Hive) type
 _TYPE_MAP = {
@@ -130,6 +133,52 @@ def provision(bucket: str, region: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# upload — push local gold Parquet to s3://bucket/gold/ (backup + prune)
+# --------------------------------------------------------------------------- #
+def upload(bucket: str, region: str) -> None:
+    """Upload local ``data/gold/*.parquet`` to ``s3://bucket/gold/``.
+
+    Backs up the existing ``gold/`` objects to ``gold_backup_<date>/`` first, then uploads
+    every local gold Parquet. Prunes any ``gold/<name>.parquet`` whose ``<name>`` is no
+    longer in :data:`GOLD_TABLES` (e.g. the retired ``signal_scores_all``) so the
+    DuckDB-served lakehouse and Athena stay in lock-step with the current schema.
+    """
+    import datetime as _dt
+    from pathlib import Path
+
+    s3 = boto3.client("s3", region_name=region)
+    stamp = _dt.date.today().isoformat()
+
+    # 1) Back up existing gold/ objects.
+    existing = s3.list_objects_v2(Bucket=bucket, Prefix="gold/").get("Contents", [])
+    for obj in existing:
+        if obj["Key"].endswith(".parquet"):
+            dest = obj["Key"].replace("gold/", f"gold_backup_{stamp}/", 1)
+            s3.copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": obj["Key"]}, Key=dest)
+    if existing:
+        print(f"[s3] backed up {len(existing)} object(s) to gold_backup_{stamp}/")
+
+    # 2) Upload local gold parquet.
+    local_gold = Path("data/gold")
+    uploaded = set()
+    for pq in sorted(local_gold.glob("*.parquet")):
+        key = f"gold/{pq.name}"
+        s3.upload_file(str(pq), bucket, key)
+        uploaded.add(pq.stem)
+        print(f"[s3] uploaded {pq.name} ({pq.stat().st_size / 1e6:.1f} MB) -> s3://{bucket}/{key}")
+
+    # 3) Prune retired tables (in S3 gold/ but neither uploaded nor a known table).
+    for obj in existing:
+        stem = obj["Key"].rsplit("/", 1)[-1].removesuffix(".parquet")
+        if obj["Key"].endswith(".parquet") and stem not in uploaded and stem not in GOLD_TABLES:
+            s3.delete_object(Bucket=bucket, Key=obj["Key"])
+            s3.delete_object(Bucket=bucket, Key=f"gold_tables/{stem}/{stem}.parquet")
+            print(f"[s3] pruned retired gold table '{stem}' (backed up above)")
+    print(f"\n✅ uploaded {len(uploaded)} gold tables to s3://{bucket}/gold/. "
+          f"Run `register` next, then drop any retired Athena table.")
+
+
+# --------------------------------------------------------------------------- #
 # register — create external tables over gold Parquet in S3
 # --------------------------------------------------------------------------- #
 def _run_athena(athena, sql: str, bucket: str, region: str) -> str:
@@ -154,6 +203,10 @@ def register(bucket: str, region: str) -> None:
 
     athena = boto3.client("athena", region_name=region)
     s3 = boto3.client("s3", region_name=region)
+
+    for retired in RETIRED_TABLES:
+        _run_athena(athena, f"DROP TABLE IF EXISTS `{retired}`", bucket, region)
+        print(f"[glue] dropped retired table {retired}")
 
     registered = 0
     for name in GOLD_TABLES:
@@ -218,12 +271,12 @@ def status(bucket: str, region: str) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("command", choices=["provision", "register", "query", "status"])
+    p.add_argument("command", choices=["provision", "upload", "register", "query", "status"])
     p.add_argument("--bucket", required=True)
     p.add_argument("--region", default="us-east-1")
     args = p.parse_args()
-    {"provision": provision, "register": register, "query": query, "status": status}[
-        args.command](args.bucket, args.region)
+    {"provision": provision, "upload": upload, "register": register,
+     "query": query, "status": status}[args.command](args.bucket, args.region)
 
 
 if __name__ == "__main__":

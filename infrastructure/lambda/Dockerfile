@@ -18,6 +18,12 @@ RUN dnf -y upgrade --refresh && dnf clean all && rm -rf /var/cache/dnf
 COPY requirements-api.txt ./
 RUN pip install --no-cache-dir -r requirements-api.txt
 
+# Pre-install the DuckDB httpfs extension into a baked directory so the Lambda runtime
+# reads gold Parquet directly from S3 (read_parquet('s3://...')) with no network
+# extension download on cold start. lakehouse._configure_s3 points at the same dir.
+ENV PHARMASIGNAL_DUCKDB_EXT_DIR=/opt/duckdb_ext
+RUN python -c "import duckdb; c=duckdb.connect(); c.execute(\"SET extension_directory='/opt/duckdb_ext'; INSTALL httpfs; INSTALL aws;\")"
+
 # The Lambda runtime does not need a package manager after build-time installs.
 # Removing it also removes libsolv, which has current ECR scanner findings in
 # the Amazon Linux base image until AWS publishes a patched base package.

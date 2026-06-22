@@ -13,6 +13,7 @@ Run (local):
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 import uuid
@@ -38,9 +39,10 @@ except ImportError:
 
 # FAERS DRUG.role_code values treated as suspect (primary/secondary/interacting).
 SUSPECT_ROLES = ["PS", "SS", "I"]
-# Cap the number of pairs we compute quarterly trend for (bounds shuffle cost + keeps
-# the emerging_signals mart small enough for the single-payload dashboard summary).
-TREND_PAIR_CAP = 2000
+# Ranking depth for the emerging_signals priority queue: we compute quarterly trend for
+# the top-K pairs by EB05. This bounds the trend shuffle and keeps emerging_signals a
+# curated "top movers" mart — it is NOT a cap on signal_scores (which is the full matrix).
+EMERGING_TOP_K = int(os.getenv("PHARMASIGNAL_TREND_TOP_K", "2000"))
 
 
 def _deduped_latest(spark, data_root: str) -> DataFrame:
@@ -177,15 +179,17 @@ def build(spark, data_root: str) -> dict:
     print(f"[gold] co-occurring pairs = {len(pairs_pd):,}", flush=True)
 
     scores_all = scoring.score_pairs(pairs_pd, n_cases, thresholds)
-    scores_df = scoring.served_mart(scores_all)
-    print(f"[gold] served signal_scores rows = {len(scores_df):,}", flush=True)
+    # signal_scores IS the full, unfiltered co-occurring matrix — no display cap.
+    scores_df = scores_all
+    print(f"[gold] signal_scores rows = {len(scores_df):,} (full matrix, unfiltered)", flush=True)
 
     # Trend only for the strongest served pairs (bounds the extra shuffle).
     emerging_df = _build_emerging(spark, data_root, case_drug, case_reaction, latest,
                                   scores_df, thresholds, weights)
 
     storage.write_parquet(scores_df, storage.gold_uri("signal_scores"))
-    storage.write_parquet(scores_all, storage.gold_uri("signal_scores_all"))
+    storage.write_parquet(scoring.scatter_sample(scores_df), storage.gold_uri("signal_scores_sample"))
+    storage.write_parquet(scoring.summary_stats(scores_df), storage.gold_uri("signal_scores_stats"))
     storage.write_parquet(emerging_df, storage.gold_uri("emerging_signals"))
 
     check_results = checks.check_signal_scores(scores_df)
@@ -229,7 +233,7 @@ def _build_emerging(spark, data_root, case_drug, case_reaction, latest,
     if scores_df.empty:
         return pd.DataFrame()
     rank_col = "eb05" if "eb05" in scores_df else "ror"
-    top = scores_df.sort_values(rank_col, ascending=False).head(TREND_PAIR_CAP)
+    top = scores_df.sort_values(rank_col, ascending=False).head(EMERGING_TOP_K)
     keys_pd = top[["drug_name_normalized", "adverse_event"]].rename(
         columns={"drug_name_normalized": "k_drug", "adverse_event": "k_event"})
     # Round-trip via Parquet (works local + S3, avoids pandas->Spark row pickling).
@@ -239,7 +243,7 @@ def _build_emerging(spark, data_root, case_drug, case_reaction, latest,
     trend = _quarterly_trend(spark, data_root, case_drug, case_reaction,
                              latest, served_keys).toPandas()
     return scoring.emerging_signals(trend, scores_df, thresholds, weights,
-                                    top_k=TREND_PAIR_CAP)
+                                    top_k=EMERGING_TOP_K)
 
 
 def main(argv: list[str] | None = None) -> None:

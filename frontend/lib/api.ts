@@ -6,6 +6,7 @@ import type {
   NhanesContext,
   PriorityLevel,
   SignalScore,
+  SignalsPage,
 } from "./types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_PHARMASIGNAL_API_BASE_URL?.replace(/\/$/, "");
@@ -66,14 +67,30 @@ const qs = (params: Record<string, string | number | boolean | undefined>) => {
   return s ? `?${s}` : "";
 };
 
-export const getSignals = (params: {
+export type SignalsQuery = {
   drug?: string;
   event?: string;
   drug_class?: string;
   flagged_only?: boolean;
   min_reports?: number;
+  q?: string;
+  sort?: string;
+  desc?: boolean;
+  offset?: number;
   limit?: number;
-} = {}) => apiGet<SignalScore[]>(`/signals${qs(params)}`);
+};
+
+/** Server-side: one page of the full matrix from the backend API (used by the route handler). */
+export const getSignals = (params: SignalsQuery = {}) =>
+  apiGet<SignalsPage>(`/signals${qs(params)}`, 0);
+
+/** Client-side: fetch a page from our same-origin route handler (which proxies the API
+ *  or paginates demo data). Safe to call from "use client" components. */
+export async function fetchSignalsPage(params: SignalsQuery = {}): Promise<SignalsPage> {
+  const res = await fetch(`/api/signals${qs(params)}`, { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`/api/signals returned ${res.status}`);
+  return (await res.json()) as SignalsPage;
+}
 
 export const getEmerging = (params: { priority?: PriorityLevel; limit?: number } = {}) =>
   apiGet<EmergingSignal[]>(`/emerging${qs(params)}`);

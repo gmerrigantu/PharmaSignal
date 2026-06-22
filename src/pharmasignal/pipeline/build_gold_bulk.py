@@ -19,8 +19,8 @@ Key steps:
   3. Co-occurrence — distinct cases per (drug, event) pair (one join + GROUP BY).
   4. Score — assemble the 2x2, run vectorized ROR/PRR/chi-square + EBGM/EB05.
   5. Trend — per-quarter pair counts for the strongest pairs -> emerging_signals.
-  6. Publish gold: ``signal_scores`` (served, gated) + ``signal_scores_all`` (full
-     matrix for power users / Athena) + ``emerging_signals`` + health/quality.
+  6. Publish gold: ``signal_scores`` (the full, unfiltered co-occurring matrix —
+     served on demand via DuckDB pushdown) + ``emerging_signals`` + health/quality.
 """
 from __future__ import annotations
 
@@ -252,12 +252,14 @@ def build(*, trend_top_k: int | None = None) -> dict:
             "No co-occurring pairs found. Did you run `make ingest-faers` first?"
         )
 
-    # Served mart: pairs meeting the minimum-count floor OR a robust EB05 signal.
-    scores_df = scoring.served_mart(scores_all)
-    _log(f"served signal_scores rows = {len(scores_df):,} (full matrix kept separately)")
+    # signal_scores IS the full, unfiltered co-occurring matrix — no display cap. The
+    # API serves any slice of it on demand via DuckDB-over-S3 pushdown.
+    scores_df = scores_all
+    _log(f"signal_scores rows = {len(scores_df):,} (full matrix, unfiltered)")
 
     # ------------------------------------------------------------------ #
     # Emerging signals — quarterly trend for the strongest pairs by EB05.
+    # This is a curated priority queue (ranked top-K), not a cap on the data above.
     # ------------------------------------------------------------------ #
     trend = _quarterly_trend(con)
     emerging_df = scoring.emerging_signals(trend, scores_df, thresholds, weights,
@@ -266,7 +268,8 @@ def build(*, trend_top_k: int | None = None) -> dict:
     # Publish gold.
     _log("writing gold tables")
     write_gold(scores_df, "signal_scores")
-    write_gold(scores_all, "signal_scores_all")
+    write_gold(scoring.scatter_sample(scores_df), "signal_scores_sample")
+    write_gold(scoring.summary_stats(scores_df), "signal_scores_stats")
     write_gold(emerging_df, "emerging_signals")
 
     check_results = checks.check_signal_scores(scores_df)

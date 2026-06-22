@@ -169,8 +169,17 @@ function usePanZoom(ext: Extent) {
     apply({ x: [d.dom.x[0] - dx, d.dom.x[1] - dx], y: [d.dom.y[0] + dy, d.dom.y[1] + dy] });
   };
   const onPointerUp = () => { drag.current = null; };
+  const reset = () => {
+    drag.current = null;
+    pending.current = null;
+    if (raf.current != null) {
+      cancelAnimationFrame(raf.current);
+      raf.current = null;
+    }
+    setView(null);
+  };
 
-  return { ref, xDomain: x, yDomain: y, zoomed: view != null, reset: () => setView(null),
+  return { ref, xDomain: x, yDomain: y, zoomed: view != null, reset,
            onPointerDown, onPointerMove, onPointerUp };
 }
 
@@ -494,7 +503,17 @@ export function SignalScatter({ rows }: { rows: SignalScore[] }) {
       {pz.zoomed && (
         <button
           type="button"
-          onClick={pz.reset}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            clearTooltip();
+          }}
+          onPointerUp={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            clearTooltip();
+            dragging.current = false;
+            pz.reset();
+          }}
           style={{ position: "absolute", top: 4, right: 6, zIndex: 2, fontSize: 11, padding: "2px 8px",
                    borderRadius: 6, cursor: "pointer", border: `1px solid ${p.grid}`, background: "transparent", color: p.axis }}
         >
