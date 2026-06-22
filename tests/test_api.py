@@ -16,8 +16,10 @@ from pharmasignal.api.main import app  # noqa: E402
 client = TestClient(app)
 
 # Tables the dashboard payload must always carry (matches frontend DashboardData).
+# signal_scores is no longer embedded as a full array — it is the unbounded matrix,
+# represented in the summary by aggregates + a bounded scatter sample.
 _DASHBOARD_TABLES = [
-    "signal_scores", "emerging_signals", "nhanes_population_context",
+    "emerging_signals", "nhanes_population_context",
     "pubmed_evidence", "pipeline_health", "data_quality_checks",
 ]
 
@@ -51,7 +53,11 @@ def test_dashboard_summary_matches_contract():
     for table in _DASHBOARD_TABLES:
         assert table in body, f"missing {table}"
         assert isinstance(body[table], list)
-    row = body["signal_scores"][0]
+    # Full-matrix aggregates + bounded scatter sample replace the embedded array.
+    assert isinstance(body["signal_total"], int) and body["signal_total"] > 0
+    assert isinstance(body["flagged_total"], int)
+    assert isinstance(body["signal_sample"], list) and body["signal_sample"]
+    row = body["signal_sample"][0]
     # Exactly the documented columns, nothing leaked from the internal model.
     assert set(row) == set(service._DASHBOARD_COLUMNS["signal_scores"])
     assert isinstance(row["disproportionality_flag"], bool)
@@ -64,23 +70,36 @@ def test_summary_is_json_safe_no_nan():
     assert "Infinity" not in raw
 
 
-def test_signals_filters():
-    all_rows = client.get("/signals").json()
-    flagged = client.get("/signals", params={"flagged_only": True}).json()
-    assert len(flagged) <= len(all_rows)
-    assert all(r["disproportionality_flag"] for r in flagged)
+def test_signals_pagination_envelope_and_filters():
+    body = client.get("/signals", params={"limit": 1000}).json()
+    # Paginated envelope: total is the full filtered count, rows is one page.
+    assert set(body) == {"total", "offset", "limit", "rows"}
+    assert body["total"] >= len(body["rows"])
+    rows = body["rows"]
+
+    flagged = client.get("/signals", params={"flagged_only": True, "limit": 1000}).json()
+    assert flagged["total"] <= body["total"]
+    assert all(r["disproportionality_flag"] for r in flagged["rows"])
     # min_reports threshold honored
-    big = client.get("/signals", params={"min_reports": 1000}).json()
-    assert all(r["a_drug_event"] >= 1000 for r in big)
-    # sorted by ROR desc
-    rors = [r["ror"] for r in all_rows]
+    big = client.get("/signals", params={"min_reports": 1000, "limit": 1000}).json()
+    assert all(r["a_drug_event"] >= 1000 for r in big["rows"])
+    # sorted by ROR desc by default
+    rors = [r["ror"] for r in rows]
     assert rors == sorted(rors, reverse=True)
 
 
+def test_signals_offset_pages_distinct_rows():
+    page1 = client.get("/signals", params={"limit": 2, "offset": 0}).json()
+    page2 = client.get("/signals", params={"limit": 2, "offset": 2}).json()
+    assert page1["rows"] and page2["rows"]
+    key = lambda r: (r["drug_name_normalized"], r["adverse_event"])
+    assert {key(r) for r in page1["rows"]}.isdisjoint({key(r) for r in page2["rows"]})
+
+
 def test_signals_drug_filter_case_insensitive():
-    lower = client.get("/signals", params={"drug": "semaglutide"}).json()
-    assert lower, "expected SEMAGLUTIDE rows"
-    assert all(r["drug_name_normalized"].upper() == "SEMAGLUTIDE" for r in lower)
+    body = client.get("/signals", params={"drug": "semaglutide", "limit": 1000}).json()
+    assert body["rows"], "expected SEMAGLUTIDE rows"
+    assert all(r["drug_name_normalized"].upper() == "SEMAGLUTIDE" for r in body["rows"])
 
 
 def test_emerging_priority_filter_and_sort():

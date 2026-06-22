@@ -81,6 +81,21 @@ _OPTIONAL_TABLES = tuple(_OPTIONAL_COLUMNS)
 _CACHE_TTL = float(os.getenv("PHARMASIGNAL_CACHE_TTL", "300"))
 _cache: dict[str, tuple[float, pd.DataFrame | None]] = {}
 
+# Default / max page size for the paginated /signals endpoint. The full signal_scores
+# matrix is unbounded (831k+ for 2024, 10^7+ for full history) — it is reached page by
+# page via DuckDB-over-S3 pushdown, never shipped in one response.
+_DEFAULT_PAGE = int(os.getenv("PHARMASIGNAL_SIGNALS_PAGE", "100"))
+_MAX_PAGE = int(os.getenv("PHARMASIGNAL_SIGNALS_MAX_PAGE", "1000"))
+# Bounded sample of the full matrix embedded in /dashboard/summary for the scatter plot
+# (rendering 831k SVG points is infeasible). Top-by-ROR, not a data cap.
+_SCATTER_SAMPLE = int(os.getenv("PHARMASIGNAL_SCATTER_SAMPLE", "3000"))
+
+# Sort keys the API will honor on /signals (whitelist — never interpolate raw input).
+_SORTABLE = {
+    "ror", "a_drug_event", "prr", "chi_square", "seriousness_rate",
+    "bayesian_shrunken_score", "ror_ci_lower", "ror_ci_upper",
+}
+
 
 def _load(name: str) -> pd.DataFrame | None:
     """Read a gold table (with TTL memoization). Returns None if it does not exist."""
@@ -121,10 +136,20 @@ def dashboard_summary() -> dict:
     Matches frontend ``DashboardData``: the six tables the dashboard renders plus
     provenance fields so the UI can show where the data came from and when.
     """
+    summary = signals_summary()
+    # Every mart EXCEPT signal_scores is small enough to embed whole. signal_scores is the
+    # full unfiltered matrix — we embed only aggregates + a bounded scatter sample, and the
+    # table pages against /signals. This keeps the payload well under the ~6 MB limit.
+    tables = {name: _records(_load(name), cols)
+              for name, cols in _DASHBOARD_COLUMNS.items() if name != "signal_scores"}
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "data_source": data_source(),
-        **{name: _records(_load(name), cols) for name, cols in _DASHBOARD_COLUMNS.items()},
+        "signal_total": summary["signal_total"],
+        "flagged_total": summary["flagged_total"],
+        "novel_total": summary["novel_total"],
+        "signal_sample": summary["signal_sample"],
+        **tables,
         # Advanced marts embedded for the frontend (empty list when not materialized).
         **{name: _records(_load(name), cols) for name, cols in _OPTIONAL_COLUMNS.items()},
     }
@@ -139,21 +164,114 @@ def _filter(df: pd.DataFrame | None, **eq: str | None) -> pd.DataFrame | None:
     return df
 
 
+def _quote(path: str) -> str:
+    """Escape a source path for safe interpolation into a SQL string literal."""
+    return path.replace("'", "''")
+
+
+def _signals_where(drug: str | None, event: str | None, drug_class: str | None,
+                   flagged_only: bool, min_reports: int, q: str | None) -> tuple[str, list]:
+    """Build a parameterized WHERE clause (values bound as ``?``, never interpolated)."""
+    clauses: list[str] = []
+    params: list = []
+    for col, val in (("drug_name_normalized", drug), ("adverse_event", event),
+                     ("drug_class", drug_class)):
+        if val:
+            clauses.append(f"upper({col}) = upper(?)")
+            params.append(val)
+    if q:
+        clauses.append("(upper(drug_name_normalized) LIKE upper(?) "
+                       "OR upper(adverse_event) LIKE upper(?))")
+        params.extend([f"%{q}%", f"%{q}%"])
+    if flagged_only:
+        clauses.append("disproportionality_flag")
+    if min_reports:
+        clauses.append("a_drug_event >= ?")
+        params.append(int(min_reports))
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
 def signals(*, drug: str | None = None, event: str | None = None,
             drug_class: str | None = None, flagged_only: bool = False,
-            min_reports: int = 0, limit: int | None = None) -> list[dict]:
-    df = _filter(_load("signal_scores"), drug_name_normalized=drug,
-                 adverse_event=event, drug_class=drug_class)
-    if df is not None:
-        if flagged_only and "disproportionality_flag" in df.columns:
-            df = df[df["disproportionality_flag"]]
-        if min_reports and "a_drug_event" in df.columns:
-            df = df[df["a_drug_event"] >= min_reports]
-        if "ror" in df.columns:
-            df = df.sort_values("ror", ascending=False)
-        if limit:
-            df = df.head(limit)
-    return _records(df, _DASHBOARD_COLUMNS["signal_scores"])
+            min_reports: int = 0, q: str | None = None, sort: str = "ror",
+            desc: bool = True, offset: int = 0, limit: int | None = None) -> dict:
+    """Paginated slice of the full signal_scores matrix via DuckDB-over-S3 pushdown.
+
+    Returns an envelope ``{total, offset, limit, rows}`` where ``total`` is the count of
+    the full filtered set (so the UI shows true totals) and ``rows`` is one page. DuckDB
+    pushes the filter/sort/limit into the Parquet scan — the whole matrix is never loaded.
+    """
+    page = _DEFAULT_PAGE if limit is None else max(1, min(int(limit), _MAX_PAGE))
+    offset = max(0, int(offset))
+    src = lakehouse.gold_source("signal_scores")
+    empty = {"total": 0, "offset": offset, "limit": page, "rows": []}
+    if not src:
+        return empty
+
+    where, params = _signals_where(drug, event, drug_class, flagged_only, min_reports, q)
+    frm = f"read_parquet('{_quote(src)}')"
+    sort_col = sort if sort in _SORTABLE else "ror"
+    direction = "DESC" if desc else "ASC"
+
+    try:
+        total = int(lakehouse.pushdown_query(
+            f"SELECT count(*) AS n FROM {frm}{where}", params).iloc[0]["n"])
+        cols = ", ".join(_DASHBOARD_COLUMNS["signal_scores"])
+        rows = lakehouse.pushdown_query(
+            f"SELECT {cols} FROM {frm}{where} "
+            f"ORDER BY {sort_col} {direction} NULLS LAST LIMIT {page} OFFSET {offset}",
+            params)
+    except Exception:  # malformed query / missing column on an older mart -> empty page
+        return empty
+    return {"total": total, "offset": offset, "limit": page,
+            "rows": _records(rows, _DASHBOARD_COLUMNS["signal_scores"])}
+
+
+def signals_summary() -> dict:
+    """Server-computed aggregates over the *full* matrix + a bounded scatter sample.
+
+    Lets the dashboard tiles show true totals and the scatter render without shipping the
+    whole matrix. ``novel_total`` comes from the (small) drug_label_flags mart.
+    """
+    src = lakehouse.gold_source("signal_scores")
+    out = {"signal_total": 0, "flagged_total": 0, "novel_total": 0, "signal_sample": []}
+    if not src:
+        return out
+    frm = f"read_parquet('{_quote(src)}')"
+    cols = ", ".join(_DASHBOARD_COLUMNS["signal_scores"])
+    try:
+        # Totals: prefer the precomputed one-row stats mart so the summary scans NOTHING
+        # over the full matrix (keeps cold starts under the API-Gateway timeout). Fall back
+        # to live COUNTs only if that mart isn't materialized.
+        stats_src = lakehouse.gold_source("signal_scores_stats")
+        if stats_src:
+            st = lakehouse.pushdown_query(
+                f"SELECT signal_total, flagged_total FROM read_parquet('{_quote(stats_src)}')").iloc[0]
+            out["signal_total"] = int(st["signal_total"])
+            out["flagged_total"] = int(st["flagged_total"])
+        else:
+            agg = lakehouse.pushdown_query(
+                f"SELECT count(*) AS total, "
+                f"count(*) FILTER (WHERE disproportionality_flag) AS flagged FROM {frm}").iloc[0]
+            out["signal_total"] = int(agg["total"])
+            out["flagged_total"] = int(agg["flagged"])
+        # Scatter sample: prefer the precomputed top-by-ROR mart (tiny, no sort needed);
+        # fall back to sorting the full matrix only if that mart isn't materialized.
+        sample_src = lakehouse.gold_source("signal_scores_sample")
+        if sample_src:
+            sample = lakehouse.pushdown_query(
+                f"SELECT {cols} FROM read_parquet('{_quote(sample_src)}')")
+        else:
+            sample = lakehouse.pushdown_query(
+                f"SELECT {cols} FROM {frm} ORDER BY ror DESC NULLS LAST LIMIT {_SCATTER_SAMPLE}")
+        out["signal_sample"] = _records(sample, _DASHBOARD_COLUMNS["signal_scores"])
+    except Exception:
+        return out
+    labels = _load("drug_label_flags")
+    if labels is not None and "novel_flag" in labels.columns:
+        out["novel_total"] = int(labels["novel_flag"].fillna(False).astype(bool).sum())
+    return out
 
 
 def emerging(*, priority: str | None = None, limit: int | None = None) -> list[dict]:
@@ -181,7 +299,7 @@ def drug_profile(drug: str) -> dict:
     return {
         "drug_name_normalized": drug.upper(),
         "data_source": data_source(),
-        "signals": signals(drug=drug),
+        "signals": signals(drug=drug, limit=_MAX_PAGE)["rows"],
         "emerging": _records(_filter(_load("emerging_signals"), drug_name_normalized=drug),
                              _DASHBOARD_COLUMNS["emerging_signals"]),
         "nhanes": _records(_filter(_load("nhanes_population_context"),
@@ -206,8 +324,17 @@ def health() -> dict:
     """Liveness + which tables are visible and their row counts (cheap, cached)."""
     tables: dict[str, int] = {}
     for name in (*_DASHBOARD_COLUMNS, *_OPTIONAL_TABLES):
+        if name == "signal_scores":
+            continue  # counted via pushdown below — never load the full matrix
         df = _load(name)
         if df is not None:
             tables[name] = int(len(df))
+    src = lakehouse.gold_source("signal_scores")
+    if src:
+        try:
+            tables["signal_scores"] = int(lakehouse.pushdown_query(
+                f"SELECT count(*) AS n FROM read_parquet('{_quote(src)}')").iloc[0]["n"])
+        except Exception:
+            pass
     return {"status": "ok", "data_source": data_source(),
             "cache_ttl_seconds": _CACHE_TTL, "tables": tables}

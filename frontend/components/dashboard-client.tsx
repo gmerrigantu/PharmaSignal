@@ -99,24 +99,24 @@ export function DashboardClient({ data }: { data: DashboardData }) {
     showFlaggedOnly: false,
     showNovelOnly: false,
   });
-  const [selectedDrug, setSelectedDrug] = useState(data.signal_scores[0]?.drug_name_normalized ?? "");
-  const [selectedEvent, setSelectedEvent] = useState(data.signal_scores[0]?.adverse_event ?? "");
+  const [selectedDrug, setSelectedDrug] = useState(data.signal_sample[0]?.drug_name_normalized ?? "");
+  const [selectedEvent, setSelectedEvent] = useState(data.signal_sample[0]?.adverse_event ?? "");
   const [selectedSignal, setSelectedSignal] = useState<EmergingSignal | undefined>(
     [...data.emerging_signals].sort((a, b) => b.priority_score - a.priority_score)[0],
   );
   const [showAllEvidence, setShowAllEvidence] = useState(false);
 
   const classes = useMemo(
-    () => ["All", ...Array.from(new Set(data.signal_scores.map((d) => d.drug_class))).sort()],
-    [data.signal_scores],
+    () => ["All", ...Array.from(new Set(data.signal_sample.map((d) => d.drug_class))).sort()],
+    [data.signal_sample],
   );
   const drugs = useMemo(
-    () => Array.from(new Set(data.signal_scores.map((r) => r.drug_name_normalized))).sort(),
-    [data.signal_scores],
+    () => Array.from(new Set(data.signal_sample.map((r) => r.drug_name_normalized))).sort(),
+    [data.signal_sample],
   );
   const events = useMemo(
-    () => Array.from(new Set(data.signal_scores.map((r) => r.adverse_event))).sort(),
-    [data.signal_scores],
+    () => Array.from(new Set(data.signal_sample.map((r) => r.adverse_event))).sort(),
+    [data.signal_sample],
   );
 
   const labelMap = useMemo(() => {
@@ -130,14 +130,14 @@ export function DashboardClient({ data }: { data: DashboardData }) {
 
   const filteredSignals = useMemo(() => {
     const q = filters.query.trim().toUpperCase();
-    return data.signal_scores
+    return data.signal_sample
       .filter((r) => filters.drugClass === "All" || r.drug_class === filters.drugClass)
       .filter((r) => r.a_drug_event >= filters.minReports)
       .filter((r) => !filters.showFlaggedOnly || r.disproportionality_flag)
       .filter((r) => !filters.showNovelOnly || labelMap.get(`${r.drug_name_normalized}::${r.adverse_event}`)?.novel_flag)
       .filter((r) => !q || `${r.drug_name_normalized} ${r.adverse_event}`.includes(q))
       .sort((a, b) => b.ror - a.ror);
-  }, [data.signal_scores, filters, labelMap]);
+  }, [data.signal_sample, filters, labelMap]);
 
   const emerging = useMemo(
     () =>
@@ -345,7 +345,7 @@ export function DashboardClient({ data }: { data: DashboardData }) {
                   onGoNovel={() => { setFilters((p) => ({ ...p, showNovelOnly: true, showFlaggedOnly: false })); setSection("Explorer"); }}
                 />
               )}
-              {section === "Explorer" && <Explorer rows={filteredSignals} labelMap={labelMap} />}
+              {section === "Explorer" && <Explorer filters={filters} labelMap={labelMap} />}
               {section === "Profiles" && (
                 <Profiles
                   data={data}

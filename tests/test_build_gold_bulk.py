@@ -97,7 +97,8 @@ def test_build_gold_bulk_dedup_and_scoring(tmp_path, monkeypatch):
 
     assert summary["cases"] == expected["n_cases"]
 
-    scores = read_gold("signal_scores_all", allow_sample=False)
+    # signal_scores is now the full, unfiltered co-occurring matrix (no separate _all).
+    scores = read_gold("signal_scores", allow_sample=False)
     drugx_eventa = scores[
         (scores["drug_name_normalized"] == "DRUGX")
         & (scores["adverse_event"] == "EVENTA")

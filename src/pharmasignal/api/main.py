@@ -71,10 +71,17 @@ def signals(
     drug_class: str | None = Query(None),
     flagged_only: bool = Query(False, description="Only disproportionality-flagged pairs"),
     min_reports: int = Query(0, ge=0, description="Minimum report count (a_drug_event)"),
-    limit: int | None = Query(None, ge=1, le=1000),
-) -> list[dict]:
+    q: str | None = Query(None, description="Substring search over drug + event names"),
+    sort: str = Query("ror", description="Sort column (ror, a_drug_event, prr, ...)"),
+    desc: bool = Query(True, description="Sort descending"),
+    offset: int = Query(0, ge=0, description="Pagination offset into the full filtered set"),
+    limit: int = Query(100, ge=1, le=1000, description="Page size"),
+) -> dict:
+    """Paginated slice of the full signal_scores matrix. Returns
+    ``{total, offset, limit, rows}`` — page through ``total`` via ``offset``."""
     return service.signals(drug=drug, event=event, drug_class=drug_class,
-                           flagged_only=flagged_only, min_reports=min_reports, limit=limit)
+                           flagged_only=flagged_only, min_reports=min_reports, q=q,
+                           sort=sort, desc=desc, offset=offset, limit=limit)
 
 
 @app.get("/emerging")

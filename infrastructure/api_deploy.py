@@ -212,7 +212,7 @@ def _deploy_lambda(region: str, image_uri: str, role_arn: str, bucket: str,
         lam.create_function(
             FunctionName=FUNCTION_NAME, PackageType="Image",
             Code={"ImageUri": image_uri}, Role=role_arn, Architectures=architectures,
-            Timeout=30, MemorySize=512, Environment=env,
+            Timeout=60, MemorySize=2048, Environment=env,
             Description="PharmaSignal read-only gold-mart serving API")
         print(f"[lambda] created {FUNCTION_NAME}")
     _wait_active(lam, FUNCTION_NAME)

@@ -104,7 +104,7 @@ def test_spark_ingest_and_gold(spark, tmp_path, monkeypatch):
     assert summary["cases"] == expected["n_cases"]
 
     import pandas as pd
-    scores = pd.read_parquet(os.path.join(tmp_path, "gold", "signal_scores_all.parquet"))
+    scores = pd.read_parquet(os.path.join(tmp_path, "gold", "signal_scores.parquet"))
     dx_ea = scores[(scores["drug_name_normalized"] == "DRUGX")
                    & (scores["adverse_event"] == "EVENTA")]
     assert len(dx_ea) == 1

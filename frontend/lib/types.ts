@@ -129,10 +129,23 @@ export type DrugLabelFlag = {
   novel_flag: boolean;
 };
 
+/** One page of the full signal_scores matrix (server-side pagination). */
+export type SignalsPage = {
+  total: number;
+  offset: number;
+  limit: number;
+  rows: SignalScore[];
+};
+
 export type DashboardData = {
   generated_at: string;
   data_source: "demo" | "pipeline" | "s3" | "api";
-  signal_scores: SignalScore[];
+  /** True totals over the FULL matrix — the table pages against /signals separately. */
+  signal_total: number;
+  flagged_total: number;
+  novel_total: number;
+  /** Bounded top-by-ROR sample for charts/dropdowns (NOT the whole matrix). */
+  signal_sample: SignalScore[];
   emerging_signals: EmergingSignal[];
   nhanes_population_context: NhanesContext[];
   pubmed_evidence: LiteratureArticle[];

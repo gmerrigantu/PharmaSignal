@@ -32,6 +32,21 @@ const emergingSignals = [
 const classOf = (drug: string): string =>
   (signalScores.find((r) => r[0] === drug)?.[2] as string | undefined) ?? "Metabolic agent";
 
+const signalSample = signalScores.map((row) => ({
+  drug_name_normalized: row[0] as string,
+  adverse_event: row[1] as string,
+  drug_class: row[2] as string,
+  a_drug_event: row[3] as number,
+  ror: row[4] as number,
+  ror_ci_lower: row[5] as number,
+  ror_ci_upper: row[6] as number,
+  prr: row[7] as number,
+  chi_square: row[8] as number,
+  seriousness_rate: row[9] as number,
+  bayesian_shrunken_score: row[10] as number,
+  disproportionality_flag: row[11] as boolean,
+}));
+
 function interaction(
   drug_a: string,
   drug_b: string,
@@ -114,20 +129,11 @@ function label(
 export const demoData: DashboardData = {
   generated_at: "2026-06-20T12:00:00Z",
   data_source: "demo",
-  signal_scores: signalScores.map((row) => ({
-    drug_name_normalized: row[0],
-    adverse_event: row[1],
-    drug_class: row[2],
-    a_drug_event: row[3],
-    ror: row[4],
-    ror_ci_lower: row[5],
-    ror_ci_upper: row[6],
-    prr: row[7],
-    chi_square: row[8],
-    seriousness_rate: row[9],
-    bayesian_shrunken_score: row[10],
-    disproportionality_flag: row[11],
-  })),
+  signal_total: signalSample.length,
+  flagged_total: signalSample.filter((r) => r.disproportionality_flag).length,
+  novel_total: 3, // ILEUS, GASTROPARESIS, CHONDRITIS in drug_label_flags below
+
+  signal_sample: signalSample,
   emerging_signals: emergingSignals.map((row) => ({
     drug_name_normalized: row[0],
     adverse_event: row[1],
