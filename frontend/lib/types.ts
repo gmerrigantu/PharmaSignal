@@ -137,6 +137,10 @@ export type SignalsPage = {
   rows: SignalScore[];
 };
 
+/** Distinct-value facets for full-scale pickers (precomputed marts, not the sample). */
+export type DrugFacet = { drug_name_normalized: string; drug_class: string; report_count: number };
+export type EventFacet = { adverse_event: string; report_count: number };
+
 export type DashboardData = {
   generated_at: string;
   data_source: "demo" | "pipeline" | "s3" | "api";

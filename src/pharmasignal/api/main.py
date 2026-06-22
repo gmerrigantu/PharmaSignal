@@ -100,6 +100,24 @@ def drug_profile(drug: str) -> dict:
     return profile
 
 
+@app.get("/facets/drug-classes")
+def facet_drug_classes() -> list[str]:
+    """Full distinct drug-class list for the class filter (small)."""
+    return service.facet_drug_classes()
+
+
+@app.get("/facets/drugs")
+def facet_drugs() -> list[dict]:
+    """All distinct drugs (name, class, case count) for the full-scale picker/autocomplete."""
+    return service.facet_drugs()
+
+
+@app.get("/facets/events")
+def facet_events() -> list[dict]:
+    """All distinct adverse events (name, case count) for the full-scale picker/autocomplete."""
+    return service.facet_events()
+
+
 @app.get("/nhanes")
 def nhanes() -> list[dict]:
     return service.nhanes()

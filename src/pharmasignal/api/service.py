@@ -320,6 +320,28 @@ def optional_table(name: str, *, drug: str | None = None) -> list[dict]:
     return _records(df, _OPTIONAL_COLUMNS.get(name))
 
 
+_DRUG_FACET_COLUMNS = ["drug_name_normalized", "drug_class", "report_count"]
+_EVENT_FACET_COLUMNS = ["adverse_event", "report_count"]
+
+
+def facet_drug_classes() -> list[str]:
+    """Full distinct drug-class list (small) for the class filter dropdown."""
+    df = _load("signal_drugs")
+    if df is None or "drug_class" not in df.columns:
+        return []
+    return sorted(str(c) for c in df["drug_class"].dropna().unique())
+
+
+def facet_drugs() -> list[dict]:
+    """All distinct drugs (name, class, case count) for the full-scale drug picker."""
+    return _records(_load("signal_drugs"), _DRUG_FACET_COLUMNS)
+
+
+def facet_events() -> list[dict]:
+    """All distinct adverse events (name, case count) for the full-scale event picker."""
+    return _records(_load("signal_events"), _EVENT_FACET_COLUMNS)
+
+
 def health() -> dict:
     """Liveness + which tables are visible and their row counts (cheap, cached)."""
     tables: dict[str, int] = {}

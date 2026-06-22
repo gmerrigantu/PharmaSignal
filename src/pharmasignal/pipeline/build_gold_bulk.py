@@ -270,6 +270,8 @@ def build(*, trend_top_k: int | None = None) -> dict:
     write_gold(scores_df, "signal_scores")
     write_gold(scoring.scatter_sample(scores_df), "signal_scores_sample")
     write_gold(scoring.summary_stats(scores_df), "signal_scores_stats")
+    write_gold(scoring.drug_facets(scores_df), "signal_drugs")
+    write_gold(scoring.event_facets(scores_df), "signal_events")
     write_gold(emerging_df, "emerging_signals")
 
     check_results = checks.check_signal_scores(scores_df)

@@ -190,6 +190,8 @@ def build(spark, data_root: str) -> dict:
     storage.write_parquet(scores_df, storage.gold_uri("signal_scores"))
     storage.write_parquet(scoring.scatter_sample(scores_df), storage.gold_uri("signal_scores_sample"))
     storage.write_parquet(scoring.summary_stats(scores_df), storage.gold_uri("signal_scores_stats"))
+    storage.write_parquet(scoring.drug_facets(scores_df), storage.gold_uri("signal_drugs"))
+    storage.write_parquet(scoring.event_facets(scores_df), storage.gold_uri("signal_events"))
     storage.write_parquet(emerging_df, storage.gold_uri("emerging_signals"))
 
     check_results = checks.check_signal_scores(scores_df)
