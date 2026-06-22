@@ -217,13 +217,6 @@ export function DashboardClient({ data }: { data: DashboardData }) {
           Hypothesis-generating signals. FAERS reports do not establish causality or incidence.
         </p>
 
-        <div className="user-card">
-          <div className="user-avatar">GM</div>
-          <div className="user-meta">
-            <p className="user-name">Grant Merrigan</p>
-            <p className="user-role">Safety researcher</p>
-          </div>
-        </div>
       </aside>
 
       <main className="main">

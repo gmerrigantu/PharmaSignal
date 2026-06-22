@@ -308,57 +308,6 @@ td.num,
   margin-top: 0.05rem;
 }
 
-/* user / account card */
-.user-card {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.5rem 0.5rem;
-  margin-top: auto;
-  border-top: 1px solid var(--border-faint);
-  padding-top: 0.75rem;
-}
-
-.user-avatar {
-  width: 2rem;
-  height: 2rem;
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--surface-3);
-  border: 1px solid var(--border);
-  color: var(--text-2);
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-.user-meta {
-  min-width: 0;
-  flex: 1;
-}
-.user-name {
-  margin: 0;
-  font-size: 0.8rem;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.user-role {
-  margin: 0;
-  color: var(--text-subtle);
-  font-size: 0.7rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.user-card .icon-button {
-  width: 1.9rem;
-  height: 1.9rem;
-}
-
 /* ============================================================================
    MAIN + COMMAND BAR
    ========================================================================== */
@@ -1624,8 +1573,7 @@ a.inline-link:hover {
     grid-auto-flow: column;
     grid-template-columns: none;
   }
-  .sidebar-note,
-  .user-card {
+  .sidebar-note {
     display: none;
   }
   .nav-group + .nav-group {

@@ -174,11 +174,57 @@ function usePanZoom(ext: Extent) {
            onPointerDown, onPointerMove, onPointerUp };
 }
 
-/* ----------------------------------------------------------- Overview: volcano-style scatter */
+/* ----------------------------------------------------------- Overview: high-volume canvas scatter */
+type SignalPoint = SignalScore & { logRor: number; radius: number };
+
+type CanvasTooltipState = {
+  x: number;
+  y: number;
+  point: SignalPoint;
+} | null;
+
+type SignalHitPoint = {
+  point: SignalPoint;
+  x: number;
+  y: number;
+};
+
+const SIGNAL_MARGIN = PLOT_INSET;
+const SIGNAL_MAX_RADIUS = 7;
+const SIGNAL_MIN_RADIUS = 2.2;
+const SIGNAL_AXIS_FONT = '11px "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
+// Tooltip geometry is intentionally conservative: the tooltip is absolutely positioned
+// and pointer-events:none, so these estimates keep it inside the chart without measuring on every hover.
+const SIGNAL_TOOLTIP_OFFSET_PX = 12;
+const SIGNAL_TOOLTIP_ESTIMATED_WIDTH_PX = 230;
+const SIGNAL_TOOLTIP_ESTIMATED_HEIGHT_PX = 150;
+// Hit-testing uses a screen-space grid so hover scans nearby points instead of every signal.
+const SIGNAL_HIT_RADIUS_PX = 12;
+const SIGNAL_HIT_RADIUS_PADDING_PX = 4;
+const SIGNAL_HIT_GRID_CELL_PX = SIGNAL_HIT_RADIUS_PX * 2;
+
+function niceDomainTicks([min, max]: Domain, count = 5) {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) return [min || 0];
+  const span = max - min;
+  const step0 = span / Math.max(1, count);
+  const mag = 10 ** Math.floor(Math.log10(step0));
+  const err = step0 / mag;
+  const step = (err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1) * mag;
+  const first = Math.ceil(min / step) * step;
+  const ticks: number[] = [];
+  for (let v = first; v <= max + step * 0.5; v += step) ticks.push(Number(v.toPrecision(12)));
+  return ticks.length ? ticks : [min, max];
+}
+
+function pointRadius(seriousnessRate: number) {
+  const t = clamp(seriousnessRate, 0, 1);
+  return SIGNAL_MIN_RADIUS + Math.sqrt(t) * (SIGNAL_MAX_RADIUS - SIGNAL_MIN_RADIUS);
+}
+
 export function SignalScatter({ rows }: { rows: SignalScore[] }) {
   const p = useChartPalette();
-  const data = useMemo(
-    () => rows.map((r) => ({ ...r, logRor: Math.log10(Math.max(r.ror, 0.01)) })),
+  const data = useMemo<SignalPoint[]>(
+    () => rows.map((r) => ({ ...r, logRor: Math.log10(Math.max(r.ror, 0.01)), radius: pointRadius(r.seriousness_rate) })),
     [rows],
   );
   const ext = useMemo<Extent>(() => {
@@ -190,18 +236,257 @@ export function SignalScatter({ rows }: { rows: SignalScore[] }) {
     return { x: [xmin - xpad, xmax + xpad], y: [0, ymax + ypad] };
   }, [data]);
   const pz = usePanZoom(ext);
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const dragging = useRef(false);
+  const tooltipRaf = useRef<number | null>(null);
+  const pendingTooltip = useRef<{ mx: number; my: number } | null>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const [tooltip, setTooltip] = useState<CanvasTooltipState>(null);
+
+  useEffect(() => {
+    const el = pz.ref.current;
+    if (!el) return;
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      setSize({ width: Math.round(r.width), height: Math.round(r.height) });
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [pz.ref]);
+
+  const hitIndex = useMemo(() => {
+    if (!size.width || !size.height) return null;
+    const plotW = Math.max(1, size.width - SIGNAL_MARGIN.left - SIGNAL_MARGIN.right);
+    const plotH = Math.max(1, size.height - SIGNAL_MARGIN.top - SIGNAL_MARGIN.bottom);
+    const xDomain = pz.xDomain;
+    const yDomain = pz.yDomain;
+    const xSpan = xDomain[1] - xDomain[0] || 1;
+    const ySpan = yDomain[1] - yDomain[0] || 1;
+    const sx = (x: number) => SIGNAL_MARGIN.left + ((x - xDomain[0]) / xSpan) * plotW;
+    const sy = (y: number) => SIGNAL_MARGIN.top + plotH - ((y - yDomain[0]) / ySpan) * plotH;
+    const buckets = new Map<string, SignalHitPoint[]>();
+    for (const point of data) {
+      if (
+        point.logRor < xDomain[0] ||
+        point.logRor > xDomain[1] ||
+        point.a_drug_event < yDomain[0] ||
+        point.a_drug_event > yDomain[1]
+      ) {
+        continue;
+      }
+      const x = sx(point.logRor);
+      const y = sy(point.a_drug_event);
+      const key = `${Math.floor(x / SIGNAL_HIT_GRID_CELL_PX)}:${Math.floor(y / SIGNAL_HIT_GRID_CELL_PX)}`;
+      const bucket = buckets.get(key);
+      const hitPoint = { point, x, y };
+      if (bucket) bucket.push(hitPoint);
+      else buckets.set(key, [hitPoint]);
+    }
+    return { buckets, plotW, plotH };
+  }, [data, pz.xDomain, pz.yDomain, size]);
+
+  useEffect(
+    () => () => {
+      if (tooltipRaf.current != null) cancelAnimationFrame(tooltipRaf.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !size.width || !size.height) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    canvas.width = Math.floor(size.width * dpr);
+    canvas.height = Math.floor(size.height * dpr);
+    canvas.style.width = `${size.width}px`;
+    canvas.style.height = `${size.height}px`;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size.width, size.height);
+
+    const plotW = Math.max(1, size.width - SIGNAL_MARGIN.left - SIGNAL_MARGIN.right);
+    const plotH = Math.max(1, size.height - SIGNAL_MARGIN.top - SIGNAL_MARGIN.bottom);
+    const xDomain = pz.xDomain;
+    const yDomain = pz.yDomain;
+    const xSpan = xDomain[1] - xDomain[0] || 1;
+    const ySpan = yDomain[1] - yDomain[0] || 1;
+    const sx = (x: number) => SIGNAL_MARGIN.left + ((x - xDomain[0]) / xSpan) * plotW;
+    const sy = (y: number) => SIGNAL_MARGIN.top + plotH - ((y - yDomain[0]) / ySpan) * plotH;
+
+    ctx.save();
+    ctx.strokeStyle = p.grid;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 4]);
+    ctx.font = SIGNAL_AXIS_FONT;
+    ctx.fillStyle = p.axis;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (const tick of niceDomainTicks(yDomain, 5)) {
+      const y = sy(tick);
+      if (y < SIGNAL_MARGIN.top || y > SIGNAL_MARGIN.top + plotH) continue;
+      ctx.beginPath();
+      ctx.moveTo(SIGNAL_MARGIN.left, y);
+      ctx.lineTo(SIGNAL_MARGIN.left + plotW, y);
+      ctx.stroke();
+      ctx.fillText(compactNumber(tick), SIGNAL_MARGIN.left - 8, y);
+    }
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (const tick of niceDomainTicks(xDomain, 5)) {
+      const x = sx(tick);
+      if (x < SIGNAL_MARGIN.left || x > SIGNAL_MARGIN.left + plotW) continue;
+      ctx.beginPath();
+      ctx.moveTo(x, SIGNAL_MARGIN.top);
+      ctx.lineTo(x, SIGNAL_MARGIN.top + plotH);
+      ctx.stroke();
+      ctx.fillText(`${Math.pow(10, tick).toFixed(1)}x`, x, SIGNAL_MARGIN.top + plotH + 8);
+    }
+    ctx.setLineDash([]);
+    ctx.strokeStyle = p.grid;
+    ctx.beginPath();
+    ctx.moveTo(SIGNAL_MARGIN.left, SIGNAL_MARGIN.top);
+    ctx.lineTo(SIGNAL_MARGIN.left, SIGNAL_MARGIN.top + plotH);
+    ctx.lineTo(SIGNAL_MARGIN.left + plotW, SIGNAL_MARGIN.top + plotH);
+    ctx.stroke();
+
+    const zeroX = sx(0);
+    if (zeroX >= SIGNAL_MARGIN.left && zeroX <= SIGNAL_MARGIN.left + plotW) {
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = p.muted;
+      ctx.beginPath();
+      ctx.moveTo(zeroX, SIGNAL_MARGIN.top);
+      ctx.lineTo(zeroX, SIGNAL_MARGIN.top + plotH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    ctx.fillStyle = p.axis;
+    ctx.font = SIGNAL_AXIS_FONT;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText("Reporting odds ratio (log scale)", SIGNAL_MARGIN.left + plotW / 2, size.height - 5);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(SIGNAL_MARGIN.left, SIGNAL_MARGIN.top, plotW, plotH);
+    ctx.clip();
+    const flagged = new Path2D();
+    const normal = new Path2D();
+    for (const point of data) {
+      if (
+        point.logRor < xDomain[0] ||
+        point.logRor > xDomain[1] ||
+        point.a_drug_event < yDomain[0] ||
+        point.a_drug_event > yDomain[1]
+      ) {
+        continue;
+      }
+      const target = point.disproportionality_flag ? flagged : normal;
+      const x = sx(point.logRor);
+      const y = sy(point.a_drug_event);
+      target.moveTo(x + point.radius, y);
+      target.arc(x, y, point.radius, 0, Math.PI * 2);
+    }
+    ctx.globalAlpha = 0.78;
+    ctx.fillStyle = p.blue;
+    ctx.fill(normal);
+    ctx.fillStyle = p.flagged;
+    ctx.fill(flagged);
+    ctx.restore();
+    ctx.restore();
+  }, [data, p.axis, p.blue, p.flagged, p.grid, p.muted, pz.xDomain, pz.yDomain, size]);
+
+  const runTooltipHitTest = (mx: number, my: number) => {
+    if (!hitIndex) return;
+    if (
+      mx < SIGNAL_MARGIN.left ||
+      mx > SIGNAL_MARGIN.left + hitIndex.plotW ||
+      my < SIGNAL_MARGIN.top ||
+      my > SIGNAL_MARGIN.top + hitIndex.plotH
+    ) {
+      setTooltip(null);
+      return;
+    }
+
+    let best: SignalPoint | null = null;
+    let bestDist = Infinity;
+    const cellX = Math.floor(mx / SIGNAL_HIT_GRID_CELL_PX);
+    const cellY = Math.floor(my / SIGNAL_HIT_GRID_CELL_PX);
+    const neighborRadius = Math.ceil(SIGNAL_HIT_RADIUS_PX / SIGNAL_HIT_GRID_CELL_PX);
+    for (let gx = cellX - neighborRadius; gx <= cellX + neighborRadius; gx += 1) {
+      for (let gy = cellY - neighborRadius; gy <= cellY + neighborRadius; gy += 1) {
+        const bucket = hitIndex.buckets.get(`${gx}:${gy}`);
+        if (!bucket) continue;
+        for (const candidate of bucket) {
+          const dx = candidate.x - mx;
+          const dy = candidate.y - my;
+          const dist = dx * dx + dy * dy;
+          const hit = Math.max(SIGNAL_HIT_RADIUS_PX, candidate.point.radius + SIGNAL_HIT_RADIUS_PADDING_PX);
+          if (dist < bestDist && dist <= hit * hit) {
+            best = candidate.point;
+            bestDist = dist;
+          }
+        }
+      }
+    }
+    setTooltip(best ? { x: mx + SIGNAL_TOOLTIP_OFFSET_PX, y: my + SIGNAL_TOOLTIP_OFFSET_PX, point: best } : null);
+  };
+
+  const scheduleTooltipUpdate = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!hitIndex) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    pendingTooltip.current = { mx: e.clientX - rect.left, my: e.clientY - rect.top };
+    if (tooltipRaf.current != null) return;
+    tooltipRaf.current = requestAnimationFrame(() => {
+      tooltipRaf.current = null;
+      const next = pendingTooltip.current;
+      pendingTooltip.current = null;
+      if (next) runTooltipHitTest(next.mx, next.my);
+    });
+  };
+
+  const clearTooltip = () => {
+    pendingTooltip.current = null;
+    if (tooltipRaf.current != null) {
+      cancelAnimationFrame(tooltipRaf.current);
+      tooltipRaf.current = null;
+    }
+    setTooltip(null);
+  };
 
   return (
     <div
       className="chart-wrap"
       ref={pz.ref}
       style={{ position: "relative", touchAction: "none", cursor: "grab" }}
-      onPointerDown={pz.onPointerDown}
-      onPointerMove={pz.onPointerMove}
-      onPointerUp={pz.onPointerUp}
-      onPointerLeave={pz.onPointerUp}
+      onPointerDown={(e) => {
+        dragging.current = true;
+        clearTooltip();
+        pz.onPointerDown(e);
+      }}
+      onPointerMove={(e) => {
+        pz.onPointerMove(e);
+        if (!dragging.current) scheduleTooltipUpdate(e);
+      }}
+      onPointerUp={(e) => {
+        dragging.current = false;
+        pz.onPointerUp();
+        scheduleTooltipUpdate(e);
+      }}
+      onPointerLeave={() => {
+        dragging.current = false;
+        pz.onPointerUp();
+        clearTooltip();
+      }}
+      onPointerCancel={() => {
+        dragging.current = false;
+        pz.onPointerUp();
+        clearTooltip();
+      }}
     >
       <span style={{ position: "absolute", top: 6, left: 10, fontSize: 10, opacity: 0.55, pointerEvents: "none", zIndex: 2 }}>
         scroll to zoom · drag to pan
@@ -216,42 +501,28 @@ export function SignalScatter({ rows }: { rows: SignalScore[] }) {
           Reset view
         </button>
       )}
-      {mounted && (
-        <ResponsiveContainer>
-          <ScatterChart margin={{ top: 16, right: 20, bottom: 28, left: 8 }}>
-            <CartesianGrid stroke={p.grid} strokeDasharray="2 4" />
-            <XAxis
-              type="number"
-              dataKey="logRor"
-              domain={pz.zoomed ? pz.xDomain : undefined}
-              allowDataOverflow={pz.zoomed}
-              stroke={p.axis}
-              tickLine={false}
-              axisLine={{ stroke: p.grid }}
-              tickFormatter={(v) => `${Math.pow(10, Number(v)).toFixed(1)}×`}
-              label={{ value: "Reporting odds ratio (log scale)", position: "insideBottom", offset: -14, fill: p.axis, fontSize: 11 }}
-            />
-            <YAxis
-              type="number"
-              dataKey="a_drug_event"
-              domain={pz.zoomed ? pz.yDomain : undefined}
-              allowDataOverflow={pz.zoomed}
-              stroke={p.axis}
-              tickLine={false}
-              axisLine={{ stroke: p.grid }}
-              tickFormatter={(v) => compactNumber(Number(v))}
-              width={48}
-            />
-            <ZAxis dataKey="seriousness_rate" range={[60, 460]} />
-            <ReferenceLine x={0} stroke={p.muted} strokeDasharray="3 3" />
-            <Tooltip content={<SignalTooltip />} cursor={{ strokeDasharray: "3 3", stroke: p.muted }} />
-            <Scatter data={data} isAnimationActive={false}>
-              {data.map((e) => (
-                <Cell key={key(e)} fill={e.disproportionality_flag ? p.flagged : p.blue} fillOpacity={0.78} />
-              ))}
-            </Scatter>
-          </ScatterChart>
-        </ResponsiveContainer>
+      <canvas ref={canvasRef} aria-label="Signal landscape scatter plot" role="img" />
+      {tooltip && (
+        <div
+          style={{
+            position: "absolute",
+            left: Math.min(tooltip.x, Math.max(0, size.width - SIGNAL_TOOLTIP_ESTIMATED_WIDTH_PX)),
+            top: Math.min(tooltip.y, Math.max(0, size.height - SIGNAL_TOOLTIP_ESTIMATED_HEIGHT_PX)),
+            zIndex: 3,
+            pointerEvents: "none",
+          }}
+        >
+          <TooltipShell
+            title={`${titleCase(tooltip.point.drug_name_normalized)} · ${titleCase(tooltip.point.adverse_event)}`}
+            sub={tooltip.point.drug_class}
+            rows={[
+              ["Reports", fullNumber(tooltip.point.a_drug_event)],
+              ["ROR", `${ratio(tooltip.point.ror)} (${ratio(tooltip.point.ror_ci_lower)}-${ratio(tooltip.point.ror_ci_upper)})`],
+              ["PRR", ratio(tooltip.point.prr)],
+              ["Serious", percent(tooltip.point.seriousness_rate)],
+            ]}
+          />
+        </div>
       )}
     </div>
   );
