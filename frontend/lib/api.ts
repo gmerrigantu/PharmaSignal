@@ -1,7 +1,9 @@
 import { demoData } from "./demo-data";
 import type {
   DashboardData,
+  DrugFacet,
   EmergingSignal,
+  EventFacet,
   LiteratureArticle,
   NhanesContext,
   PriorityLevel,
@@ -90,6 +92,32 @@ export async function fetchSignalsPage(params: SignalsQuery = {}): Promise<Signa
   const res = await fetch(`/api/signals${qs(params)}`, { headers: { accept: "application/json" } });
   if (!res.ok) throw new Error(`/api/signals returned ${res.status}`);
   return (await res.json()) as SignalsPage;
+}
+
+// --- Facets (full distinct-value lists for pickers) ------------------------------ //
+
+export type FacetKind = "drug-classes" | "drugs" | "events";
+
+/** Server-side: distinct-value facet from the backend API (used by the route handler). */
+export const getFacet = <T>(kind: FacetKind) => apiGet<T>(`/facets/${kind}`, 0);
+
+/** Client-side: fetch a facet list from our same-origin route handler. */
+export async function fetchDrugClasses(): Promise<string[]> {
+  const res = await fetch("/api/facets/drug-classes", { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`/api/facets/drug-classes returned ${res.status}`);
+  return (await res.json()) as string[];
+}
+
+export async function fetchDrugFacets(): Promise<DrugFacet[]> {
+  const res = await fetch("/api/facets/drugs", { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`/api/facets/drugs returned ${res.status}`);
+  return (await res.json()) as DrugFacet[];
+}
+
+export async function fetchEventFacets(): Promise<EventFacet[]> {
+  const res = await fetch("/api/facets/events", { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`/api/facets/events returned ${res.status}`);
+  return (await res.json()) as EventFacet[];
 }
 
 export const getEmerging = (params: { priority?: PriorityLevel; limit?: number } = {}) =>

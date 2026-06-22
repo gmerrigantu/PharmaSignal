@@ -2,7 +2,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   BookOpen,
@@ -33,6 +33,7 @@ import {
   Overview,
   Profiles,
 } from "@/components/views";
+import { fetchDrugClasses } from "@/lib/api";
 import { absoluteTime, downloadCsv, relativeTime } from "@/lib/format";
 import { useTheme } from "@/lib/theme";
 import type { DashboardData, DrugLabelFlag, EmergingSignal, Filters, PriorityLevel } from "@/lib/types";
@@ -106,17 +107,21 @@ export function DashboardClient({ data }: { data: DashboardData }) {
   );
   const [showAllEvidence, setShowAllEvidence] = useState(false);
 
+  // Full distinct drug-class list from the API (falls back to the sample until it loads).
+  const [drugClasses, setDrugClasses] = useState<string[]>([]);
+  useEffect(() => {
+    fetchDrugClasses()
+      .then(setDrugClasses)
+      .catch(() => setDrugClasses([]));
+  }, []);
   const classes = useMemo(
-    () => ["All", ...Array.from(new Set(data.signal_sample.map((d) => d.drug_class))).sort()],
-    [data.signal_sample],
-  );
-  const drugs = useMemo(
-    () => Array.from(new Set(data.signal_sample.map((r) => r.drug_name_normalized))).sort(),
-    [data.signal_sample],
-  );
-  const events = useMemo(
-    () => Array.from(new Set(data.signal_sample.map((r) => r.adverse_event))).sort(),
-    [data.signal_sample],
+    () => [
+      "All",
+      ...(drugClasses.length
+        ? drugClasses
+        : Array.from(new Set(data.signal_sample.map((d) => d.drug_class))).sort()),
+    ],
+    [drugClasses, data.signal_sample],
   );
 
   const labelMap = useMemo(() => {
@@ -349,8 +354,6 @@ export function DashboardClient({ data }: { data: DashboardData }) {
               {section === "Profiles" && (
                 <Profiles
                   data={data}
-                  drugs={drugs}
-                  events={events}
                   selectedDrug={selectedDrug}
                   selectedEvent={selectedEvent}
                   setSelectedDrug={setSelectedDrug}

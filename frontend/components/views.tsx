@@ -32,7 +32,7 @@ import {
   SignalScatter,
 } from "@/components/charts";
 import { Badge, Empty, Panel, Stat, type BadgeTone } from "@/components/ui";
-import { fetchSignalsPage } from "@/lib/api";
+import { fetchDrugFacets, fetchEventFacets, fetchSignalsPage } from "@/lib/api";
 import {
   compactNumber,
   fullNumber,
@@ -71,6 +71,63 @@ const statusTone: Record<QualityCheck["status"], BadgeTone> = {
 
 const pair = (r: { drug_name_normalized: string; adverse_event: string }) =>
   `${r.drug_name_normalized}::${r.adverse_event}`;
+
+/** Indeterminate progress bar shown during server-side fetches. */
+function LoadingBar() {
+  return <div className="loading-bar" role="progressbar" aria-label="Loading" />;
+}
+
+/** Searchable picker over a large value list (client-side filter, top matches). */
+function Combobox({
+  value,
+  onChange,
+  options,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const matches = useMemo(() => {
+    const q = query.trim().toUpperCase();
+    const pool = q ? options.filter((o) => o.toUpperCase().includes(q)) : options;
+    return pool.slice(0, 50);
+  }, [options, query]);
+
+  return (
+    <div className="combobox" onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false); }}>
+      <input
+        value={open ? query : titleCase(value)}
+        placeholder={placeholder ?? "Search…"}
+        onFocus={() => { setOpen(true); setQuery(""); }}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+        aria-label={placeholder ?? "Search"}
+      />
+      {open && (
+        <div className="combobox-list">
+          {matches.length ? (
+            matches.map((o) => (
+              <button
+                key={o}
+                type="button"
+                className={`combobox-option ${o === value ? "active" : ""}`}
+                // onMouseDown fires before input blur, so the selection registers.
+                onMouseDown={(e) => { e.preventDefault(); onChange(o); setOpen(false); }}
+              >
+                {titleCase(o)}
+              </button>
+            ))
+          ) : (
+            <p className="combobox-empty">{options.length ? "No matches." : "Loading…"}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function LabelBadge({ flag }: { flag?: DrugLabelFlag }) {
   if (!flag || flag.label_status === "unknown") {
@@ -321,10 +378,15 @@ export function Explorer({ filters, labelMap }: { filters: Filters; labelMap: La
   return (
     <Panel
       title="Signal explorer"
-      caption={`${fullNumber(total)} drug–event pairs match the current filters. Click a column to sort; page through every result below.`}
+      caption={`${page ? fullNumber(total) : "…"} drug–event pairs match the current filters. Click a column to sort; page through every result below.`}
     >
+      {loading && <LoadingBar />}
       {error ? (
         <Empty icon={Inbox}>Couldn’t load signals: {error}</Empty>
+      ) : !page && loading ? (
+        <div style={{ padding: "2.5rem 0", textAlign: "center", color: "var(--text-muted)" }}>
+          Loading signals…
+        </div>
       ) : total === 0 && !loading ? (
         <Empty icon={Inbox}>No drug–event pairs match the current filters.</Empty>
       ) : (
@@ -434,27 +496,52 @@ function CiCell({ value, lo, hi }: { value: number; lo: number; hi: number }) {
 /* ====================================================================== PROFILES */
 export function Profiles({
   data,
-  drugs,
-  events,
   selectedDrug,
   selectedEvent,
   setSelectedDrug,
   setSelectedEvent,
 }: {
   data: DashboardData;
-  drugs: string[];
-  events: string[];
   selectedDrug: string;
   selectedEvent: string;
   setSelectedDrug: (d: string) => void;
   setSelectedEvent: (e: string) => void;
 }) {
-  const drugRows = data.signal_sample
-    .filter((r) => r.drug_name_normalized === selectedDrug)
-    .sort((a, b) => b.a_drug_event - a.a_drug_event);
-  const eventRows = data.signal_sample
-    .filter((r) => r.adverse_event === selectedEvent)
-    .sort((a, b) => b.ror - a.ror);
+  // Full distinct picker lists (loaded once from the facet endpoints).
+  const [drugOptions, setDrugOptions] = useState<string[]>([]);
+  const [eventOptions, setEventOptions] = useState<string[]>([]);
+  useEffect(() => {
+    fetchDrugFacets().then((d) => setDrugOptions(d.map((x) => x.drug_name_normalized))).catch(() => {});
+    fetchEventFacets().then((e) => setEventOptions(e.map((x) => x.adverse_event))).catch(() => {});
+  }, []);
+
+  // Profile rows fetched server-side over the FULL matrix (not the sample).
+  const [drugRows, setDrugRows] = useState<SignalScore[]>([]);
+  const [drugLoading, setDrugLoading] = useState(false);
+  useEffect(() => {
+    if (!selectedDrug) return;
+    let cancelled = false;
+    setDrugLoading(true);
+    fetchSignalsPage({ drug: selectedDrug, sort: "a_drug_event", limit: 200 })
+      .then((p) => !cancelled && setDrugRows(p.rows))
+      .catch(() => !cancelled && setDrugRows([]))
+      .finally(() => !cancelled && setDrugLoading(false));
+    return () => { cancelled = true; };
+  }, [selectedDrug]);
+
+  const [eventRows, setEventRows] = useState<SignalScore[]>([]);
+  const [eventLoading, setEventLoading] = useState(false);
+  useEffect(() => {
+    if (!selectedEvent) return;
+    let cancelled = false;
+    setEventLoading(true);
+    fetchSignalsPage({ event: selectedEvent, sort: "ror", limit: 200 })
+      .then((p) => !cancelled && setEventRows(p.rows))
+      .catch(() => !cancelled && setEventRows([]))
+      .finally(() => !cancelled && setEventLoading(false));
+    return () => { cancelled = true; };
+  }, [selectedEvent]);
+
   const nhanes = data.nhanes_population_context.find((r) => r.medication_name_normalized === selectedDrug);
   const allSubgroups = data.subgroup_signals ?? [];
   const subgroups = allSubgroups.filter(
@@ -468,20 +555,11 @@ export function Profiles({
         title="Drug profile"
         caption="Most-reported adverse events and population context for the selected drug."
         action={
-          <select
-            value={selectedDrug}
-            onChange={(e) => setSelectedDrug(e.target.value)}
-            style={{ height: "2.1rem", borderRadius: "var(--r-sm)", border: "1px solid var(--border)", background: "var(--surface-2)", padding: "0 0.6rem" }}
-          >
-            {drugs.map((d) => (
-              <option key={d} value={d}>
-                {titleCase(d)}
-              </option>
-            ))}
-          </select>
+          <Combobox value={selectedDrug} onChange={setSelectedDrug} options={drugOptions} placeholder="Search drugs…" />
         }
       >
-        {drugRows.length ? <ProfileBars rows={drugRows} /> : <Empty icon={Inbox}>No data.</Empty>}
+        {drugLoading && <LoadingBar />}
+        {drugRows.length ? <ProfileBars rows={drugRows} /> : !drugLoading && <Empty icon={Inbox}>No data.</Empty>}
         {nhanes && (
           <div className="kpi-grid" style={{ marginTop: "1rem" }}>
             <Stat icon={Users} label="Weighted prevalence" value={percent(nhanes.weighted_prevalence, 2)} foot={`NHANES ${nhanes.survey_cycle}`} />
@@ -495,19 +573,10 @@ export function Profiles({
         title="Adverse-event profile"
         caption="Drugs ranked by reporting odds ratio for the selected event."
         action={
-          <select
-            value={selectedEvent}
-            onChange={(e) => setSelectedEvent(e.target.value)}
-            style={{ height: "2.1rem", borderRadius: "var(--r-sm)", border: "1px solid var(--border)", background: "var(--surface-2)", padding: "0 0.6rem" }}
-          >
-            {events.map((ev) => (
-              <option key={ev} value={ev}>
-                {titleCase(ev)}
-              </option>
-            ))}
-          </select>
+          <Combobox value={selectedEvent} onChange={setSelectedEvent} options={eventOptions} placeholder="Search events…" />
         }
       >
+        {eventLoading && <LoadingBar />}
         <div className="rows">
           {eventRows.slice(0, 9).map((r) => (
             <div className="row" key={pair(r)}>
@@ -520,7 +589,7 @@ export function Profiles({
               <Badge tone={r.disproportionality_flag ? "accent" : "neutral"}>ROR {ratio(r.ror)}</Badge>
             </div>
           ))}
-          {!eventRows.length && <Empty icon={Inbox}>No data.</Empty>}
+          {!eventRows.length && !eventLoading && <Empty icon={Inbox}>No data.</Empty>}
         </div>
       </Panel>
     </div>

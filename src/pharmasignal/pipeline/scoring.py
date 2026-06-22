@@ -115,6 +115,37 @@ def summary_stats(scores_all: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([{"signal_total": int(len(scores_all)), "flagged_total": flagged}])
 
 
+def drug_facets(scores_all: pd.DataFrame) -> pd.DataFrame:
+    """Distinct drugs with class + case count (``signal_drugs`` mart).
+
+    Powers the full-scale drug picker / class filter without scanning the whole matrix on
+    each request. ``report_count`` is the drug marginal (a + b), constant within a drug.
+    """
+    cols = ["drug_name_normalized", "drug_class", "report_count"]
+    if scores_all.empty:
+        return pd.DataFrame(columns=cols)
+    df = scores_all[["drug_name_normalized", "drug_class", "a_drug_event",
+                     "b_drug_other_events"]].copy()
+    df["report_count"] = (df["a_drug_event"] + df["b_drug_other_events"]).astype(int)
+    g = df.groupby("drug_name_normalized", as_index=False).agg(
+        drug_class=("drug_class", "first"), report_count=("report_count", "max"))
+    return g.sort_values("report_count", ascending=False).reset_index(drop=True)[cols]
+
+
+def event_facets(scores_all: pd.DataFrame) -> pd.DataFrame:
+    """Distinct adverse events with case count (``signal_events`` mart).
+
+    ``report_count`` is the event marginal (a + c), constant within an event.
+    """
+    cols = ["adverse_event", "report_count"]
+    if scores_all.empty:
+        return pd.DataFrame(columns=cols)
+    df = scores_all[["adverse_event", "a_drug_event", "c_other_drugs_event"]].copy()
+    df["report_count"] = (df["a_drug_event"] + df["c_other_drugs_event"]).astype(int)
+    g = df.groupby("adverse_event", as_index=False).agg(report_count=("report_count", "max"))
+    return g.sort_values("report_count", ascending=False).reset_index(drop=True)[cols]
+
+
 def emerging_signals(trend: pd.DataFrame, scores_df: pd.DataFrame,
                      thresholds: SignalThresholds, weights: dict[str, float],
                      *, top_k: int) -> pd.DataFrame:
