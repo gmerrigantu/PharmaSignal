@@ -12,7 +12,9 @@ from pathlib import Path
 # Repo root = three levels up from this file: src/pharmasignal/paths.py -> repo
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-CONFIG_DIR = REPO_ROOT / "config"
+# CONFIG_DIR is overridable so packaged deployments (e.g. an EMR Serverless venv
+# archive) can ship the YAML config alongside the code rather than next to the repo.
+CONFIG_DIR = Path(os.getenv("PHARMASIGNAL_CONFIG_DIR", REPO_ROOT / "config"))
 SAMPLE_DATA_DIR = REPO_ROOT / "sample_data"
 
 # Allow overriding the data root (e.g. point at a mounted S3 prefix or a tmp dir).

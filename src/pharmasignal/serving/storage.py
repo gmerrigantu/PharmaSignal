@@ -81,6 +81,20 @@ def read_parquet(uri: str) -> pd.DataFrame:
     return pd.read_parquet(uri)
 
 
+def write_bytes(data: bytes, uri: str) -> str:
+    """Write raw bytes to a local path or s3:// URI (used for bronze staging)."""
+    if not uri.startswith("s3://"):
+        os.makedirs(os.path.dirname(uri), exist_ok=True)
+    with fsspec.open(uri, "wb") as fh:
+        fh.write(data)
+    return uri
+
+
+def read_bytes(uri: str) -> bytes:
+    with fsspec.open(uri, "rb") as fh:
+        return fh.read()
+
+
 def write_json(obj: dict, uri: str) -> None:
     if not uri.startswith("s3://"):
         os.makedirs(os.path.dirname(uri), exist_ok=True)

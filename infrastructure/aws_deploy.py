@@ -30,7 +30,7 @@ from botocore.exceptions import ClientError
 GLUE_DB = "pharmasignal"
 ATHENA_WORKGROUP = "pharmasignal"
 GOLD_TABLES = [
-    "signal_scores", "drug_event_counts", "emerging_signals", "drug_label_flags",
+    "signal_scores", "signal_scores_all", "drug_event_counts", "emerging_signals", "drug_label_flags",
     "subgroup_signals", "interaction_signals",
     "nhanes_population_context", "pubmed_evidence", "pubmed_support_summary",
     "pipeline_health", "data_quality_checks",

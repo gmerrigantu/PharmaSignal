@@ -6,15 +6,20 @@ PYTHONPATH ?= src
 ENV_FILE ?= .env
 ENV_PREFIX = set -a; [ ! -f $(ENV_FILE) ] || . $(ENV_FILE); set +a;
 
-.PHONY: help install install-dev install-api demo pipeline pipeline-aws nhanes pubmed dashboard dashboard-aws api-local api-deploy api-url test lint clean
+.PHONY: help install install-dev install-api demo pipeline pipeline-aws ingest-faers gold-bulk stage-faers spark-ingest-local spark-gold-local nhanes pubmed dashboard dashboard-aws api-local api-deploy api-url test lint clean
 
 help:
 	@echo "PharmaSignal make targets:"
 	@echo "  install      Install runtime dependencies"
 	@echo "  install-dev  Install runtime + dev/test dependencies"
 	@echo "  demo         Generate the bundled offline demo dataset into data/gold"
-	@echo "  pipeline     Run the openFDA -> silver/gold pipeline (needs network)"
+	@echo "  pipeline     Run the openFDA -> silver/gold pipeline (API mode, demo scope)"
 	@echo "  pipeline-aws Run pipeline using .env, e.g. PHARMASIGNAL_DATA_ROOT=s3://bucket"
+	@echo "  ingest-faers Download FAERS quarterly ZIPs -> silver (QUARTERS=\"2023q1..2023q4\")"
+	@echo "  gold-bulk    Score the whole drug x event matrix from silver via SQL (no API)"
+	@echo "  stage-faers  Download+extract FAERS ASCII -> bronze for Spark (QUARTERS=...)"
+	@echo "  spark-ingest-local  Run the PySpark ingest job locally (bronze -> silver)"
+	@echo "  spark-gold-local    Run the PySpark gold/score job locally (silver -> gold)"
 	@echo "  nhanes       Ingest NHANES population context (needs network, downloads XPT)"
 	@echo "  pubmed       Fetch PubMed evidence for top signals (needs network)"
 	@echo "  labels       Flag each signal labeled-vs-novel via openFDA Drug Label API"
@@ -45,6 +50,31 @@ pipeline:
 
 pipeline-aws:
 	$(ENV_PREFIX) PYTHONPATH=$(PYTHONPATH) $(PY) -m pharmasignal.pipeline.build_gold
+
+# Whole-database production path (WS1/WS2). QUARTERS accepts ranges + lists, e.g.
+#   make ingest-faers QUARTERS="2021q1..2023q4"
+# With no QUARTERS it falls back to the list in config/faers_quarters.yml.
+ingest-faers:
+	$(ENV_PREFIX) PYTHONPATH=$(PYTHONPATH) $(PY) -m pharmasignal.ingestion.faers_quarterly $(QUARTERS)
+
+# Set-based SQL scoring over silver -> gold (no network). Run after ingest-faers.
+gold-bulk:
+	$(ENV_PREFIX) PYTHONPATH=$(PYTHONPATH) $(PY) -m pharmasignal.pipeline.build_gold_bulk
+
+# --- Spark backfill path (heavy compute) ---------------------------------------
+# stage-faers writes raw ASCII to bronze (local or s3:// via PHARMASIGNAL_DATA_ROOT);
+# needs internet so run it locally / in CI, NOT on EMR. Then run the Spark jobs.
+stage-faers:
+	$(ENV_PREFIX) PYTHONPATH=$(PYTHONPATH) $(PY) -m pharmasignal.ingestion.stage_faers $(QUARTERS)
+
+# Same PySpark jobs EMR Serverless runs, in local Spark (needs pyspark + Java).
+spark-ingest-local:
+	$(ENV_PREFIX) PYTHONPATH=$(PYTHONPATH) $(PY) spark/jobs/ingest_faers_spark.py \
+		--data-root $(or $(DATA_ROOT),./data) --quarters $(QUARTERS)
+
+spark-gold-local:
+	$(ENV_PREFIX) PYTHONPATH=$(PYTHONPATH) $(PY) spark/jobs/build_gold_spark.py \
+		--data-root $(or $(DATA_ROOT),./data)
 
 nhanes:
 	PYTHONPATH=$(PYTHONPATH) $(PY) -m pharmasignal.nhanes.ingest

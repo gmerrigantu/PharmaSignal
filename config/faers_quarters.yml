@@ -8,7 +8,7 @@
 # full relational structure. See src/pharmasignal/ingestion/faers_quarterly.py.
 version: 1
 
-ingestion_mode: api          # api | quarterly_file
+ingestion_mode: quarterly_file   # quarterly_file (production, whole-DB) | api (drill-down demo)
 
 # Time window used for API-mode scoring + quarterly trend.
 window:

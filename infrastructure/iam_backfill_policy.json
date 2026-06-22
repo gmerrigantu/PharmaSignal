@@ -1,0 +1,35 @@
+{
+  "_comment": "Attach this policy to the IAM user 'PharmaSignal' (or an admin runs the backfill) so it can provision + run the EMR Serverless backfill. Scoped to one bucket + the pharmasignal execution role. Region us-east-1, account <ACCOUNT_ID>.",
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EmrServerlessManageAndRun",
+      "Effect": "Allow",
+      "Action": [
+        "emr-serverless:CreateApplication",
+        "emr-serverless:GetApplication",
+        "emr-serverless:ListApplications",
+        "emr-serverless:StartApplication",
+        "emr-serverless:StopApplication",
+        "emr-serverless:DeleteApplication",
+        "emr-serverless:StartJobRun",
+        "emr-serverless:GetJobRun",
+        "emr-serverless:ListJobRuns",
+        "emr-serverless:CancelJobRun",
+        "emr-serverless:TagResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CreateAndPassExecutionRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:GetRole",
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::<ACCOUNT_ID>:role/pharmasignal-emr-serverless-role"
+    }
+  ]
+}

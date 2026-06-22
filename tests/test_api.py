@@ -23,7 +23,11 @@ _DASHBOARD_TABLES = [
 
 
 @pytest.fixture(autouse=True)
-def _fresh_cache():
+def _demo_dataset(tmp_path, monkeypatch):
+    # Force the bundled demo gold: point the lakehouse at an empty root so reads fall
+    # back to sample_data/, independent of any real data/gold present on the machine
+    # (e.g. after a local backfill run). Keeps these contract tests deterministic.
+    monkeypatch.setenv("PHARMASIGNAL_DATA_ROOT", str(tmp_path))
     service.clear_cache()
     yield
     service.clear_cache()
