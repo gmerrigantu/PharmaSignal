@@ -1,0 +1,128 @@
+name: Quarterly FAERS ingest
+
+# Runs every Monday at 08:00 UTC.  Exits cleanly if FDA hasn't published the
+# expected quarter yet — so there's no harm running weekly.  Can also be triggered
+# manually with a specific quarter override.
+#
+# What this does:
+#   1. Restores existing silver from S3 so the resume logic skips all prior quarters.
+#   2. Downloads + ingests only the new quarter; skips gracefully if FDA hasn't
+#      published it yet.
+#   3. Persists the new silver partition back to S3.
+#   4. Re-scores the full drug × event matrix via build_gold_bulk (reads local silver).
+#   5. Uploads the new gold tables to S3 where the API serves them.
+#
+# Required GitHub repository secrets:
+#   AWS_ACCESS_KEY_ID       — IAM key for the PharmaSignal user
+#   AWS_SECRET_ACCESS_KEY   — corresponding secret
+#
+# Required GitHub repository variables:
+#   LAKE_BUCKET             — S3 bucket name (e.g. pharmasignal-data-762032552349)
+#   AWS_REGION              — e.g. us-east-1
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"   # 08:00 UTC every Monday
+  workflow_dispatch:
+    inputs:
+      quarter:
+        description: "Quarter to ingest (e.g. 2026q2). Leave blank to auto-detect."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Free up ~20 GB of pre-installed toolchains so there's room for silver + DuckDB.
+      - name: Free up runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Detect quarter to ingest
+        id: quarter
+        run: |
+          if [ -n "${{ inputs.quarter }}" ]; then
+            QUARTER="${{ inputs.quarter }}"
+          else
+            QUARTER=$(python3 - <<'EOF'
+          from datetime import date
+          d = date.today()
+          y, m = d.year, d.month
+          # FDA publishes data roughly 2 months after the quarter closes:
+          #   Q1 (Jan–Mar) → available ~May      trigger: May 1
+          #   Q2 (Apr–Jun) → available ~Aug      trigger: Aug 1
+          #   Q3 (Jul–Sep) → available ~Nov      trigger: Nov 1
+          #   Q4 (Oct–Dec) → available ~Feb+1    trigger: Feb 1
+          if   m <  5: q, y = 4, y - 1
+          elif m <  8: q = 1
+          elif m < 11: q = 2
+          else:        q = 3
+          print(f"{y}q{q}")
+          EOF
+          )
+          fi
+          echo "quarter=$QUARTER" >> "$GITHUB_OUTPUT"
+          echo "Targeting quarter: $QUARTER"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      # Restore all existing silver so the ingester skips already-done quarters
+      # and the gold-bulk has the full history to score against.
+      - name: Restore silver from S3
+        run: |
+          aws s3 sync "s3://${{ vars.LAKE_BUCKET }}/silver/" data/silver/ \
+            --no-progress --only-show-errors
+          echo "Silver restored:"
+          du -sh data/silver/
+
+      - name: Ingest new FAERS quarter
+        run: |
+          PYTHONPATH=src python -m pharmasignal.ingestion.faers_quarterly \
+            --prune-bronze ${{ steps.quarter.outputs.quarter }}
+
+      # Persist the new silver partition so future runs can restore it.
+      - name: Persist new silver to S3
+        run: |
+          aws s3 sync data/silver/ "s3://${{ vars.LAKE_BUCKET }}/silver/" \
+            --no-progress --only-show-errors
+
+      - name: Build full gold from silver
+        env:
+          PHARMASIGNAL_DATA_ROOT: ${{ github.workspace }}/data
+          # 4 GB buffer pool — ubuntu-latest has 7 GB RAM; leaves headroom for OS + Python.
+          PHARMASIGNAL_DUCKDB_MEMORY_LIMIT: "4gb"
+          PHARMASIGNAL_DUCKDB_THREADS: "2"
+        run: PYTHONPATH=src python -m pharmasignal.pipeline.build_gold_bulk
+
+      - name: Upload gold to S3
+        run: |
+          aws s3 sync data/gold/ "s3://${{ vars.LAKE_BUCKET }}/gold/" \
+            --no-progress --only-show-errors
+          echo "Gold uploaded:"
+          aws s3 ls "s3://${{ vars.LAKE_BUCKET }}/gold/" --human-readable
+
+      - name: Clean up working files
+        if: always()
+        run: rm -rf data/duckdb_tmp/ data/bronze/

@@ -24,6 +24,14 @@ BRONZE_DIR = DATA_ROOT / "bronze"
 SILVER_DIR = DATA_ROOT / "silver"
 GOLD_DIR = DATA_ROOT / "gold"
 
+# Local-only paths — always the repo's data/ dir regardless of PHARMASIGNAL_DATA_ROOT.
+# Use these in modules that do local I/O only (e.g. faers_quarterly, stage_faers)
+# so that PHARMASIGNAL_DATA_ROOT=s3://... doesn't redirect their writes to a
+# nonsensical local path.
+LOCAL_DATA_ROOT = REPO_ROOT / "data"
+LOCAL_BRONZE_DIR = LOCAL_DATA_ROOT / "bronze"
+LOCAL_SILVER_DIR = LOCAL_DATA_ROOT / "silver"
+
 
 def ensure_dirs() -> None:
     """Create the lakehouse directory tree if it does not yet exist."""

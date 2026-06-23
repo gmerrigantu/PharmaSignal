@@ -13,10 +13,15 @@ For each drug-event pair, over a chosen window and (optionally) drug role:
 | **Drug of interest** | a | b |
 | **Other drugs** | c | d |
 
-In API mode the cells are assembled from openFDA marginal counts:
+**API mode** (`build_gold.py`): cells assembled from openFDA marginal counts:
 `a = count(drug ∧ event)`, `drug_total = count(drug)`, `event_total = count(event)`,
 `N = count(all)`, then `b = drug_total − a`, `c = event_total − a`, `d = N − a − b − c`
 (clamped at 0). Implemented in `Contingency.from_totals`.
+
+**Bulk SQL mode** (`build_gold_bulk.py`): cells derived from three `GROUP BY` aggregations
+over the silver FAERS tables — per-drug totals, per-event totals, and co-occurrence counts.
+All statistics are then applied vectorized over the full drug × event DataFrame via the same
+functions in `modeling/signal_scores.py` and `pipeline/scoring.py`.
 
 ## 2. Reporting Odds Ratio (ROR)
 
@@ -57,8 +62,9 @@ OE   = a / E[a]
 score = w · log(OE),   w = a / (a + 0.5)
 ```
 
-Deliberately named *simplified empirical Bayes shrinkage* — **not** EBGM/MGPS — to
-avoid implying regulatory equivalence.
+Deliberately named *simplified empirical-Bayes shrinkage* — **not** EBGM/MGPS — to
+avoid implying regulatory equivalence. Upgrading to full gamma-Poisson MGPS (EBGM / EB05)
+is the top P1 roadmap item; see [roadmap.md](roadmap.md).
 
 ## 6. Trend / anomaly (emerging signals)
 
@@ -71,6 +77,10 @@ baseline of `trend_baseline_quarters` (default 4):
 - **Poisson anomaly** `P(X ≥ current | baseline mean)` — probability the current
   count is that high under the baseline rate.
 
+In API mode, trend counts come from per-quarter openFDA `count` calls.
+In bulk SQL mode, trend counts are derived from a single `GROUP BY faers_quarter`
+aggregation over the partitioned silver tables.
+
 ## 7. Composite priority score
 
 ```
@@ -82,12 +92,39 @@ S = seriousness rate, L = literature support, P = population-context score — e
 [0, 1]. Weights live in `config/signal_thresholds.yml`. **Components are always shown;
 the composite never hides them.** Levels: High ≥ 0.75, Moderate ≥ 0.50, else Low.
 
-## 8. NHANES population context (§10)
+The full 5-component priority requires the enrichment step (`make enrich` /
+`pipeline/enrich_signals.py`), which joins `pubmed_support_summary` and
+`nhanes_population_context` back onto `emerging_signals`.
 
-NHANES supplies **aggregate** population context: survey-weighted medication-use
-prevalence, estimated users, and demographic/clinical profiles (age, sex, BMI, HbA1c,
-diabetes). Key rules:
+## 8. Labeled vs. novel
 
+For each flagged drug-event pair, `build_label_flags.py` queries the openFDA Drug Label
+API and checks whether the adverse event appears in a safety section (boxed warning,
+contraindications, warnings_and_cautions, warnings, adverse_reactions, precautions) using
+a British→American spelling-aware text matcher. Signals are classified as `labeled`,
+`novel`, or `unknown`. **Novel signals are the primary review focus.** This is a text
+heuristic, not a regulatory determination — absence of a match is not proof of absence.
+
+## 9. Subgroup signals
+
+`build_subgroups.py` recomputes ROR/PRR within demographic strata (sex: male/female;
+age band: 0–17, 18–64, 65+) for the top base signals. Strata marginals are cached so
+the computation remains bounded. Results are compared to the overall ROR to surface
+demographic concentration.
+
+## 10. Drug-drug interaction signals
+
+`build_interactions.py` identifies co-reported drug pairs where the combination's ROR
+for a given event materially exceeds each single-drug's ROR. The `interaction_ratio` is
+combo ROR ÷ stronger single-drug ROR; flagged when ratio ≥ 2, lower CI > 1, and
+sufficient reports exist. A real single-agent baseline must exist for the pair to be scored.
+
+## 11. NHANES population context
+
+NHANES supplies **aggregate** population context: survey-weighted medication-use prevalence,
+estimated users, and demographic/clinical profiles (age, sex, BMI, HbA1c, diabetes).
+
+Key rules:
 - Use the documented survey weight (MEC weight `WTMEC2YR` when merging exam/lab data).
 - Always display the **unweighted sample count**; flag small-n (< 30) and very-small-n
   (< 10) estimates as unstable.
@@ -95,13 +132,17 @@ diabetes). Key rules:
   to drug/class outputs.
 - The optional *population-context reporting index* (FAERS volume ÷ NHANES exposure)
   is **not** an incidence rate and is labeled as such.
+- Complex-survey variance (strata/PSU CIs) is documented in the roadmap but not yet
+  computed — current estimates are point estimates only.
 
-## 9. PubMed literature support (§11)
+## 12. PubMed literature support
 
-Transparent, keyword/title-based relevance scoring (BM25/embeddings are a documented
-upgrade path). The literature-support score and `None/Weak/Moderate/Strong` labels
-describe **retrieval support**, not clinical evidence strength. PMIDs and article
-links are always shown.
+Transparent, keyword/title-based relevance scoring with British→American spelling
+normalization. The literature-support score and `None/Weak/Moderate/Strong` labels
+describe **retrieval support**, not clinical evidence strength. PMIDs and article links
+are always shown. Upgrading to embedding-based semantic search is a P2 roadmap item.
+
+---
 
 ## Recommended dashboard wording
 
