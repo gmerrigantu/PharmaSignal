@@ -65,10 +65,42 @@ def _silver_has(table: str) -> bool:
 
 
 def _connect_duckdb():
-    """DuckDB connection wired for S3 when the lakehouse root is s3://."""
-    import duckdb
+    """File-backed DuckDB connection with laptop-safe resource limits.
 
-    con = duckdb.connect()
+    We use a persistent database file so DuckDB's buffer pool can spill pages
+    to disk when RAM fills up — essential for the full-FAERS co-occurrence join
+    (~17 M cases) on an 8 GB laptop.  Override via env vars:
+
+        PHARMASIGNAL_DUCKDB_MEMORY_LIMIT  (default: "3gb"  — buffer pool size)
+        PHARMASIGNAL_DUCKDB_THREADS       (default: 2)
+        PHARMASIGNAL_DUCKDB_WORK_DB       (default: data/duckdb_tmp/working.duckdb)
+
+    The working.duckdb file is deleted on success by the caller.
+    """
+    import duckdb
+    from ..paths import LOCAL_DATA_ROOT
+
+    tmp_dir = LOCAL_DATA_ROOT / "duckdb_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    work_db = os.getenv(
+        "PHARMASIGNAL_DUCKDB_WORK_DB",
+        str(tmp_dir / "working.duckdb"),
+    )
+
+    # Remove stale working db from a previous failed run so we start fresh.
+    if os.path.exists(work_db):
+        os.remove(work_db)
+
+    con = duckdb.connect(work_db)
+
+    mem_limit = os.getenv("PHARMASIGNAL_DUCKDB_MEMORY_LIMIT", "3gb")
+    n_threads = int(os.getenv("PHARMASIGNAL_DUCKDB_THREADS") or 2)
+
+    con.execute(f"SET memory_limit='{mem_limit}';")
+    con.execute(f"SET threads={n_threads};")
+    con.execute("SET preserve_insertion_order=false;")
+    _log(f"DuckDB: memory_limit={mem_limit}, threads={n_threads}, db={work_db}")
+
     if storage.is_s3():
         con.execute("INSTALL httpfs; LOAD httpfs;")
         region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
@@ -93,26 +125,29 @@ def _roles_sql() -> str:
 
 
 def _build_case_tables(con) -> None:
-    """Register deduped case-level drug and reaction relations in ``con``.
+    """Materialize deduped case-level tables into the file-backed DuckDB database.
 
-    After this runs the connection has temp views: ``latest_case`` (one row per
-    surviving caseid/primaryid), ``case_drug`` and ``case_reaction``
-    (distinct primaryid x key), plus ``n_cases`` scalar.
+    Writing physical tables to the on-disk DB file (rather than lazy TEMP VIEWs)
+    lets the subsequent pair-count join stream from disk instead of re-scanning all
+    parquet in RAM — essential for the full-FAERS co-occurrence join on 8 GB laptops.
+
+    After this runs the connection has tables: ``latest_case``, ``case_drug``,
+    ``case_reaction`` (and optionally ``serious_case``).
     """
     reports = _silver_glob("reports")
     drugs = _silver_glob("drugs")
     reactions = _silver_glob("reactions")
     deleted = _silver_glob("deleted_cases")
 
-    # Deleted-cases table may not exist for every quarter; tolerate its absence.
     deleted_clause = (
         f"WHERE CAST(caseid AS VARCHAR) NOT IN "
         f"(SELECT CAST(caseid AS VARCHAR) FROM read_parquet('{deleted}'))"
         if _silver_has("deleted_cases") else ""
     )
 
+    _log("materializing latest_case ...")
     con.execute(f"""
-        CREATE OR REPLACE TEMP VIEW latest_case AS
+        CREATE TABLE latest_case AS
         WITH ranked AS (
             SELECT
                 CAST(caseid AS VARCHAR)    AS caseid,
@@ -129,8 +164,9 @@ def _build_case_tables(con) -> None:
         SELECT caseid, primaryid FROM ranked WHERE rn = 1
     """)
 
+    _log("materializing case_drug ...")
     con.execute(f"""
-        CREATE OR REPLACE TEMP VIEW case_drug AS
+        CREATE TABLE case_drug AS
         SELECT DISTINCT lc.primaryid,
                COALESCE(NULLIF(d.drug_name_normalized, ''), d.drug_name_raw) AS drug,
                ANY_VALUE(d.drug_class) AS drug_class
@@ -141,8 +177,9 @@ def _build_case_tables(con) -> None:
         GROUP BY lc.primaryid, drug
     """)
 
+    _log("materializing case_reaction ...")
     con.execute(f"""
-        CREATE OR REPLACE TEMP VIEW case_reaction AS
+        CREATE TABLE case_reaction AS
         SELECT DISTINCT lc.primaryid,
                COALESCE(NULLIF(r.reaction_term_normalized, ''), r.reaction_term) AS event
         FROM read_parquet('{reactions}') r
@@ -152,54 +189,83 @@ def _build_case_tables(con) -> None:
 
 
 def _score_matrix(con, *, minimum_reports: int) -> tuple[pd.DataFrame, int]:
-    """Return the fully-scored co-occurring drug-event matrix and grand total N."""
+    """Return the fully-scored co-occurring drug-event matrix and grand total N.
+
+    The pair-count join (case_drug × case_reaction on primaryid) is too large to
+    fit in the 2-4 GB available on an 8 GB laptop.  We process it in N chunks
+    keyed by ``hash(primaryid) % N`` so each chunk handles 1/N of cases.
+    Because case_drug and case_reaction are already deduped on (primaryid, drug) /
+    (primaryid, event), COUNT(primaryid) == COUNT(DISTINCT primaryid) everywhere.
+    """
     n_cases = con.execute("SELECT COUNT(*) FROM latest_case").fetchone()[0]
     if not n_cases:
         return pd.DataFrame(), 0
 
-    # Seriousness from OUTC (a case is serious if it has any reported outcome). Joined
-    # into the pair count as serious_a; scales as a set-based join like everything else.
+    n_chunks = int(os.getenv("PHARMASIGNAL_PAIR_CHUNKS", "10"))
+
+    # Seriousness flag — materialize once so chunks can join cheaply.
     has_serious = _silver_has("outcomes")
     if has_serious:
         con.execute(
-            "CREATE OR REPLACE TEMP VIEW serious_case AS "
+            "CREATE TABLE IF NOT EXISTS serious_case AS "
             "SELECT DISTINCT CAST(primaryid AS VARCHAR) AS primaryid "
             "FROM read_parquet('%s')" % _silver_glob("outcomes"))
-        pair_select = (
-            "SELECT cd.drug, cr.event, COUNT(DISTINCT cd.primaryid) AS a, "
-            "COUNT(DISTINCT CASE WHEN s.primaryid IS NOT NULL THEN cd.primaryid END) AS serious_a "
-            "FROM case_drug cd JOIN case_reaction cr ON cd.primaryid = cr.primaryid "
-            "LEFT JOIN serious_case s ON cd.primaryid = s.primaryid "
-            "GROUP BY cd.drug, cr.event")
-        extra_col = ", p.serious_a"
-    else:
-        pair_select = (
-            "SELECT cd.drug, cr.event, COUNT(DISTINCT cd.primaryid) AS a "
-            "FROM case_drug cd JOIN case_reaction cr ON cd.primaryid = cr.primaryid "
-            "GROUP BY cd.drug, cr.event")
-        extra_col = ""
 
-    # Marginals (cheap) + co-occurrence (the one heavy join). DuckDB streams these.
+    # ---- marginals (cheap scalar GROUP BYs on already-materialized tables) ---- #
+    _log("computing marginals ...")
+    con.execute("""
+        CREATE TABLE drug_marginal AS
+        SELECT drug, ANY_VALUE(drug_class) AS drug_class, COUNT(primaryid) AS drug_total
+        FROM case_drug GROUP BY drug
+    """)
+    con.execute("""
+        CREATE TABLE event_marginal AS
+        SELECT event, COUNT(primaryid) AS event_total
+        FROM case_reaction GROUP BY event
+    """)
+
+    # ---- chunked pair counts -------------------------------------------------- #
+    serious_join = (
+        "LEFT JOIN serious_case s ON cd.primaryid = s.primaryid" if has_serious else ""
+    )
+    serious_col = (
+        ", COUNT(CASE WHEN s.primaryid IS NOT NULL THEN cd.primaryid END) AS serious_a"
+        if has_serious else ""
+    )
+
+    con.execute(
+        f"CREATE TABLE pair_staging (drug VARCHAR, event VARCHAR, a BIGINT{', serious_a BIGINT' if has_serious else ''})"
+    )
+    for k in range(n_chunks):
+        _log(f"pair chunk {k+1}/{n_chunks} ...")
+        con.execute(f"""
+            INSERT INTO pair_staging
+            SELECT cd.drug, cr.event, COUNT(cd.primaryid) AS a{serious_col}
+            FROM case_drug cd
+            JOIN case_reaction cr ON cd.primaryid = cr.primaryid
+            {serious_join}
+            WHERE hash(cd.primaryid) % {n_chunks} = {k}
+            GROUP BY cd.drug, cr.event
+        """)
+
+    _log("aggregating pair chunks ...")
+    con.execute(f"""
+        CREATE TABLE pair_counts AS
+        SELECT drug, event, SUM(a) AS a{', SUM(serious_a) AS serious_a' if has_serious else ''}
+        FROM pair_staging GROUP BY drug, event
+    """)
+
+    extra_col = ", pc.serious_a" if has_serious else ""
     pairs = con.execute(f"""
-        WITH drug_tot AS (
-            SELECT drug, ANY_VALUE(drug_class) AS drug_class,
-                   COUNT(DISTINCT primaryid) AS drug_total
-            FROM case_drug GROUP BY drug
-        ),
-        event_tot AS (
-            SELECT event, COUNT(DISTINCT primaryid) AS event_total
-            FROM case_reaction GROUP BY event
-        ),
-        pair AS ({pair_select})
-        SELECT p.drug AS drug_name_normalized,
-               dt.drug_class,
-               p.event AS adverse_event,
-               p.a,
-               dt.drug_total,
-               et.event_total{extra_col}
-        FROM pair p
-        JOIN drug_tot dt ON p.drug = dt.drug
-        JOIN event_tot et ON p.event = et.event
+        SELECT pc.drug AS drug_name_normalized,
+               dm.drug_class,
+               pc.event AS adverse_event,
+               pc.a,
+               dm.drug_total,
+               em.event_total{extra_col}
+        FROM pair_counts pc
+        JOIN drug_marginal dm ON pc.drug = dm.drug
+        JOIN event_marginal em ON pc.event = em.event
     """).fetchdf()
 
     if pairs.empty:
@@ -210,20 +276,30 @@ def _score_matrix(con, *, minimum_reports: int) -> tuple[pd.DataFrame, int]:
 
 
 def _quarterly_trend(con) -> pd.DataFrame:
-    """Per-quarter distinct-case counts for every (drug, event) pair (one GROUP BY)."""
+    """Per-quarter case counts for every (drug, event) pair.
+
+    Reads faers_quarter from reports silver (already materialized in case_drug/
+    case_reaction), joining back on primaryid.  Uses COUNT not COUNT DISTINCT
+    because the case tables are already deduped.
+    """
+    # Materialize a quarter lookup from reports silver (primaryid → faers_quarter).
+    con.execute(f"""
+        CREATE TABLE IF NOT EXISTS case_quarter AS
+        SELECT DISTINCT lc.primaryid, r.faers_quarter
+        FROM latest_case lc
+        JOIN read_parquet('{_silver_glob("reports")}') r
+          ON CAST(r.primaryid AS VARCHAR) = lc.primaryid
+    """)
     return con.execute("""
         SELECT cd.drug AS drug_name_normalized,
                cr.event AS adverse_event,
                q.faers_quarter,
-               COUNT(DISTINCT cd.primaryid) AS report_count
+               COUNT(cd.primaryid) AS report_count
         FROM case_drug cd
         JOIN case_reaction cr ON cd.primaryid = cr.primaryid
-        JOIN (
-            SELECT DISTINCT CAST(primaryid AS VARCHAR) AS primaryid, faers_quarter
-            FROM read_parquet('%s')
-        ) q ON cd.primaryid = q.primaryid
+        JOIN case_quarter q ON cd.primaryid = q.primaryid
         GROUP BY 1, 2, 3
-    """ % _silver_glob("reports")).fetchdf()
+    """).fetchdf()
 
 
 def build(*, trend_top_k: int | None = None) -> dict:
@@ -294,6 +370,8 @@ def build(*, trend_top_k: int | None = None) -> dict:
     }])
     write_gold(health, "pipeline_health")
     write_gold(pd.DataFrame([c.__dict__ for c in check_results]), "data_quality_checks")
+
+    con.close()
 
     return {
         "cases": n_cases,

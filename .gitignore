@@ -10,6 +10,7 @@ data/bronze/
 data/silver/
 data/gold/
 data/_tmp/
+data/duckdb_tmp/
 !data/**/.gitkeep
 
 # Secrets — NEVER commit credentials or API keys
@@ -51,3 +52,6 @@ s3:/
 !sample_data/
 
 update_notes.txt
+
+*.log
+*.tmp

@@ -6,32 +6,39 @@ PYTHONPATH ?= src
 ENV_FILE ?= .env
 ENV_PREFIX = set -a; [ ! -f $(ENV_FILE) ] || . $(ENV_FILE); set +a;
 
-.PHONY: help install install-dev install-api demo pipeline pipeline-aws ingest-faers gold-bulk stage-faers spark-ingest-local spark-gold-local nhanes pubmed dashboard dashboard-aws api-local api-deploy api-url test lint clean
+.PHONY: help install install-dev install-api demo pipeline pipeline-aws ingest-faers gold-bulk backfill-local stage-faers spark-ingest-local spark-gold-local nhanes pubmed dashboard dashboard-aws api-local api-deploy api-url test lint clean
 
 help:
 	@echo "PharmaSignal make targets:"
-	@echo "  install      Install runtime dependencies"
-	@echo "  install-dev  Install runtime + dev/test dependencies"
-	@echo "  demo         Generate the bundled offline demo dataset into data/gold"
-	@echo "  pipeline     Run the openFDA -> silver/gold pipeline (API mode, demo scope)"
-	@echo "  pipeline-aws Run pipeline using .env, e.g. PHARMASIGNAL_DATA_ROOT=s3://bucket"
-	@echo "  ingest-faers Download FAERS quarterly ZIPs -> silver (QUARTERS=\"2023q1..2023q4\")"
-	@echo "  gold-bulk    Score the whole drug x event matrix from silver via SQL (no API)"
-	@echo "  stage-faers  Download+extract FAERS ASCII -> bronze for Spark (QUARTERS=...)"
+	@echo "  install          Install runtime dependencies"
+	@echo "  install-dev      Install runtime + dev/test dependencies"
+	@echo "  demo             Generate the bundled offline demo dataset into data/gold"
+	@echo "  pipeline         Run the openFDA -> silver/gold pipeline (API mode, demo scope)"
+	@echo "  pipeline-aws     Run pipeline using .env, e.g. PHARMASIGNAL_DATA_ROOT=s3://bucket"
+	@echo "  ingest-faers     Download FAERS quarterly ZIPs -> silver (QUARTERS=\"2023q1..2023q4\")"
+	@echo "                   Skips quarters already in silver; --force to override"
+	@echo "                   --prune-bronze deletes each ZIP after ingest (saves ~300 MB/quarter)"
+	@echo "  gold-bulk        Score the whole drug x event matrix from silver via SQL (no API)"
+	@echo "                   Env: PHARMASIGNAL_DUCKDB_MEMORY_LIMIT (default 4gb)"
+	@echo "                        PHARMASIGNAL_DUCKDB_THREADS (default cpu_count/2)"
+	@echo "  backfill-local   Full backfill: ingest 2012q4..2025q4 + score (resumable)"
+	@echo "                   Skips already-ingested quarters; prunes bronze ZIPs; safe for laptops"
+	@echo "                   Override range: make backfill-local QUARTERS=\"2018q1..2025q4\""
+	@echo "  stage-faers      Download+extract FAERS ASCII -> bronze for Spark (QUARTERS=...)"
 	@echo "  spark-ingest-local  Run the PySpark ingest job locally (bronze -> silver)"
 	@echo "  spark-gold-local    Run the PySpark gold/score job locally (silver -> gold)"
-	@echo "  nhanes       Ingest NHANES population context (needs network, downloads XPT)"
-	@echo "  pubmed       Fetch PubMed evidence for top signals (needs network)"
-	@echo "  labels       Flag each signal labeled-vs-novel via openFDA Drug Label API"
-	@echo "  enrich       Join PubMed+NHANES into emerging_signals, recompute priority"
-	@echo "  pipeline-full Run pipeline -> nhanes -> pubmed -> enrich in order"
-	@echo "  dashboard    Launch the Streamlit dashboard"
-	@echo "  dashboard-aws Launch dashboard using .env, e.g. PHARMASIGNAL_DATA_ROOT=s3://bucket"
-	@echo "  api-local    Run the FastAPI serving layer locally (uvicorn :8000)"
-	@echo "  api-deploy   Build+push image and deploy Lambda + HTTP API (BUCKET=, CORS=)"
-	@echo "  api-url      Print the deployed API base URL"
-	@echo "  test         Run unit tests"
-	@echo "  clean        Remove generated lakehouse data (keeps sample_data/)"
+	@echo "  nhanes           Ingest NHANES population context (needs network, downloads XPT)"
+	@echo "  pubmed           Fetch PubMed evidence for top signals (needs network)"
+	@echo "  labels           Flag each signal labeled-vs-novel via openFDA Drug Label API"
+	@echo "  enrich           Join PubMed+NHANES into emerging_signals, recompute priority"
+	@echo "  pipeline-full    Run pipeline -> nhanes -> pubmed -> enrich in order"
+	@echo "  dashboard        Launch the Streamlit dashboard"
+	@echo "  dashboard-aws    Launch dashboard using .env, e.g. PHARMASIGNAL_DATA_ROOT=s3://bucket"
+	@echo "  api-local        Run the FastAPI serving layer locally (uvicorn :8000)"
+	@echo "  api-deploy       Build+push image and deploy Lambda + HTTP API (BUCKET=, CORS=)"
+	@echo "  api-url          Print the deployed API base URL"
+	@echo "  test             Run unit tests"
+	@echo "  clean            Remove generated lakehouse data (keeps sample_data/)"
 
 install:
 	$(PIP) install -r requirements.txt
@@ -60,6 +67,29 @@ ingest-faers:
 # Set-based SQL scoring over silver -> gold (no network). Run after ingest-faers.
 gold-bulk:
 	$(ENV_PREFIX) PYTHONPATH=$(PYTHONPATH) $(PY) -m pharmasignal.pipeline.build_gold_bulk
+
+# Full local backfill: download + ingest FAERS quarterly ZIPs -> silver, then score.
+# Skips quarters that are already in silver (idempotent / resumable).
+# Prunes each bronze ZIP after ingest so peak extra disk is ~one quarter (~400 MB).
+# Default range 2012q4..2025q4; override with QUARTERS= e.g. make backfill-local QUARTERS="2020q1..2025q4"
+# DuckDB memory/thread limits are set inside build_gold_bulk; override via env vars.
+BACKFILL_QUARTERS ?= 2012q4..2026q1
+# LOCAL_DATA_ROOT is always the repo's data/ dir regardless of PHARMASIGNAL_DATA_ROOT in .env.
+# Both ingest (which writes silver) and gold-bulk (which reads silver + writes gold) must use
+# the same local root so .env's PHARMASIGNAL_DATA_ROOT=s3://... doesn't misdirect them.
+LOCAL_DATA_ROOT := $(CURDIR)/data
+backfill-local:
+	@echo "=== PharmaSignal full-FAERS local backfill ==="
+	@echo "    Range: $(BACKFILL_QUARTERS)"
+	@echo "    Already-ingested quarters will be skipped automatically."
+	@echo "    Bronze ZIPs deleted after each quarter to keep disk footprint minimal."
+	@echo ""
+	$(ENV_PREFIX) PHARMASIGNAL_DATA_ROOT=$(LOCAL_DATA_ROOT) PYTHONPATH=$(PYTHONPATH) $(PY) \
+		-m pharmasignal.ingestion.faers_quarterly --prune-bronze $(BACKFILL_QUARTERS)
+	@echo ""
+	@echo "=== Scoring full drug x event matrix from silver ==="
+	$(ENV_PREFIX) PHARMASIGNAL_DATA_ROOT=$(LOCAL_DATA_ROOT) PYTHONPATH=$(PYTHONPATH) $(PY) \
+		-m pharmasignal.pipeline.build_gold_bulk
 
 # --- Spark backfill path (heavy compute) ---------------------------------------
 # stage-faers writes raw ASCII to bronze (local or s3:// via PHARMASIGNAL_DATA_ROOT);

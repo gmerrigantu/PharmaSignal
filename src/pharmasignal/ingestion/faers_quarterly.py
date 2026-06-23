@@ -11,10 +11,26 @@ because each quarter is hundreds of MB. Invoke explicitly:
     python -m pharmasignal.ingestion.faers_quarterly 2023q4
 
 Implements ING-FAERS-001..007.
+
+Resume behaviour
+----------------
+Each quarter is marked complete by a ``_SUCCESS`` sentinel written into the silver
+``reports`` partition after all tables for that quarter are flushed.  On re-run the
+quarter is skipped automatically.  Pass ``--force`` to overwrite existing silver.
+Quarters produced by the Spark backfill path (which writes ``part-*.parquet`` files
+rather than a sentinel) are also recognised as complete.
+
+Disk / memory safety
+--------------------
+Pass ``--prune-bronze`` to delete each ZIP immediately after the quarter is ingested —
+this keeps the peak extra disk footprint to ~one quarter's ZIP size (~300–500 MB) rather
+than the cumulative total.  A hard 2 GB free-space floor is checked before each download;
+a softer 5 GB warning is printed below that.
 """
 from __future__ import annotations
 
 import io
+import shutil
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,7 +39,7 @@ import pandas as pd
 import requests
 
 from .. import config
-from ..paths import BRONZE_DIR, SILVER_DIR
+from ..paths import LOCAL_BRONZE_DIR as BRONZE_DIR, LOCAL_SILVER_DIR as SILVER_DIR
 from ..transforms.normalize import normalize_drug, normalize_reaction
 
 # Public FDA quarterly extract files. The ASCII (not XML) packages are used.
@@ -66,6 +82,67 @@ RPSR_COLUMNS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Resume / disk-safety helpers
+# ---------------------------------------------------------------------------
+
+def _silver_reports_dir(ref: "QuarterRef"):
+    return SILVER_DIR / "faers" / "reports" / f"year={ref.year}" / f"quarter=Q{ref.quarter}"
+
+
+def _success_marker(ref: "QuarterRef"):
+    return _silver_reports_dir(ref) / "_SUCCESS"
+
+
+def _is_quarter_ingested(ref: "QuarterRef") -> bool:
+    """True if this quarter's silver is already complete.
+
+    Accepts both the ``_SUCCESS`` sentinel written by this module and the
+    Spark-generated ``part-*.parquet`` layout (no sentinel, but parquets exist).
+    """
+    if _success_marker(ref).exists():
+        return True
+    d = _silver_reports_dir(ref)
+    return d.is_dir() and any(d.glob("*.parquet"))
+
+
+def _mark_ingested(ref: "QuarterRef") -> None:
+    """Write a _SUCCESS sentinel so subsequent runs skip this quarter."""
+    _silver_reports_dir(ref).mkdir(parents=True, exist_ok=True)
+    _success_marker(ref).touch()
+
+
+def _check_disk_space(path=None, hard_floor_gb: float = 2.0, warn_floor_gb: float = 5.0) -> None:
+    """Abort if free space is below the hard floor; warn below the soft floor."""
+    check_path = path or str(SILVER_DIR.parent.parent)
+    usage = shutil.disk_usage(check_path)
+    free_gb = usage.free / (1024 ** 3)
+    if free_gb < hard_floor_gb:
+        raise SystemExit(
+            f"Only {free_gb:.1f} GB free — aborting to protect your disk.  "
+            f"Free up at least {hard_floor_gb:.0f} GB then retry.  "
+            "Tip: run with --prune-bronze to delete each ZIP after ingest."
+        )
+    if free_gb < warn_floor_gb:
+        print(
+            f"  [warn] {free_gb:.1f} GB free — consider --prune-bronze to reclaim space.",
+            flush=True,
+        )
+
+
+def _prune_bronze_zip(ref: "QuarterRef") -> None:
+    """Delete the downloaded ZIP for *ref* to reclaim disk space."""
+    d = BRONZE_DIR / "faers" / f"year={ref.year}" / f"quarter=Q{ref.quarter}"
+    removed = []
+    for f in d.glob("*.zip"):
+        f.unlink()
+        removed.append(f.name)
+    if removed:
+        print(f"  [pruned] {', '.join(removed)}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+
 @dataclass(frozen=True)
 class QuarterRef:
     year: int
@@ -94,6 +171,8 @@ def download_quarter(ref: QuarterRef, *, timeout: int = 120) -> "io.BytesIO":
 
     if dest.exists():
         return io.BytesIO(dest.read_bytes())
+
+    _check_disk_space()
 
     resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
@@ -128,7 +207,12 @@ def _read_ascii_table(zf: zipfile.ZipFile, table: str, ref: QuarterRef) -> pd.Da
     if name is None:
         return pd.DataFrame()
     with zf.open(name) as fh:
-        return pd.read_csv(fh, sep="$", dtype=str, encoding="latin-1", on_bad_lines="skip")
+        df = pd.read_csv(fh, sep="$", dtype=str, encoding="latin-1", on_bad_lines="skip")
+    # Early FAERS quarterly files begin with a UTF-8 BOM (\xef\xbb\xbf) that pandas
+    # reads as the latin-1 characters 'ï»¿' prepended to the first column name.
+    # Strip both the decoded form and the raw Unicode BOM character to be safe.
+    df.columns = [c.replace("ï»¿", "").replace("﻿", "").strip() for c in df.columns]
+    return df
 
 
 def build_silver_from_quarter(ref: QuarterRef) -> dict[str, int]:
@@ -152,6 +236,10 @@ def build_silver_from_quarter(ref: QuarterRef) -> dict[str, int]:
     # --- reports ---
     if not demo.empty:
         demo = demo.rename(columns={k: v for k, v in DEMO_COLUMNS.items() if k in demo.columns})
+        # Some older quarters have both `reporter_country` and `occr_country` (or both
+        # `sex` and `gndr_cod`) in the same file.  After the rename both become the same
+        # canonical name — drop the second occurrence to avoid the duplicate-column error.
+        demo = demo.loc[:, ~demo.columns.duplicated()]
         demo["faers_quarter"] = ref.label
         demo["event_date"] = pd.to_datetime(demo.get("event_date"), format="%Y%m%d", errors="coerce")
         demo["receive_date"] = pd.to_datetime(demo.get("receive_date"), format="%Y%m%d", errors="coerce")
@@ -209,6 +297,8 @@ def build_silver_from_quarter(ref: QuarterRef) -> dict[str, int]:
         _write_partition(deleted_df, part / "deleted_cases", ref)
         counts["deleted_cases"] = len(deleted_df)
 
+    # Mark this quarter done so re-runs skip it.
+    _mark_ingested(ref)
     return counts
 
 
@@ -262,18 +352,67 @@ def expand_quarters(tokens: list[str]) -> list[QuarterRef]:
 def main(argv: list[str] | None = None) -> None:
     import sys
 
-    args = argv if argv is not None else sys.argv[1:]
+    raw_args = argv if argv is not None else sys.argv[1:]
+
+    # Parse flags (-- prefixed); everything else is quarter tokens.
+    force = "--force" in raw_args
+    prune_bronze = "--prune-bronze" in raw_args
+    args = [a for a in raw_args if not a.startswith("--")]
+
     if not args:
-        # Fall back to the quarters listed in config when called with no args.
         args = list(config.load_faers_config().get("quarters", []))
     if not args:
-        print("usage: python -m pharmasignal.ingestion.faers_quarterly "
-              "<YYYYqQ | YYYYqQ..YYYYqQ> [...]")
+        print(
+            "usage: python -m pharmasignal.ingestion.faers_quarterly "
+            "<YYYYqQ | YYYYqQ..YYYYqQ> [...]\n"
+            "flags: --force (re-ingest already-done quarters)  "
+            "--prune-bronze (delete ZIP after each quarter)"
+        )
         return
-    for ref in expand_quarters(args):
-        print(f"Ingesting FAERS {ref.label} ...")
-        summary = build_silver_from_quarter(ref)
-        print(f"  -> {summary}")
+
+    refs = expand_quarters(args)
+    n_total = len(refs)
+    n_skip = sum(1 for r in refs if _is_quarter_ingested(r))
+    n_todo = n_total - n_skip if not force else n_total
+
+    print(
+        f"[faers_quarterly] {n_total} quarters requested — "
+        f"{n_skip} already ingested, {n_todo} to process"
+        + (" (--force: re-ingesting all)" if force else ""),
+        flush=True,
+    )
+
+    done, skipped = 0, 0
+    for i, ref in enumerate(refs, 1):
+        if not force and _is_quarter_ingested(ref):
+            print(f"  [{i}/{n_total}] {ref.label} — already ingested, skipping", flush=True)
+            skipped += 1
+            continue
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        print(f"  [{i}/{n_total}] {ref.label} — ingesting ... ({ts})", flush=True)
+        try:
+            summary = build_silver_from_quarter(ref)
+        except Exception as exc:
+            import requests as _req
+            if isinstance(exc, _req.HTTPError) and exc.response is not None and exc.response.status_code == 404:
+                print(
+                    f"  [{i}/{n_total}] {ref.label} — not yet published by FDA (HTTP 404); "
+                    "skipping.  Re-run once FDA releases this quarter.",
+                    flush=True,
+                )
+                skipped += 1
+                continue
+            raise
+        print(f"    -> {summary}", flush=True)
+        if prune_bronze:
+            _prune_bronze_zip(ref)
+        done += 1
+
+    print(
+        f"[faers_quarterly] done — {done} ingested, {skipped} skipped.  "
+        f"Run `make gold-bulk` to (re)score the full matrix.",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
