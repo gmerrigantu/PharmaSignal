@@ -76,20 +76,48 @@ def _deleted_caseids(spark, data_root: str) -> DataFrame | None:
             .distinct())
 
 
+def _drug_dimension(spark, data_root: str):
+    """Load the optional RxNorm ingredient map (gold drug_dimension), or None."""
+    import fsspec
+
+    path = f"{C.gold_dir(data_root)}/drug_dimension.parquet"
+    fs, _ = fsspec.core.url_to_fs(path)
+    try:
+        if not fs.exists(path):
+            return None
+    except Exception:
+        return None
+    return spark.read.parquet(path).select(
+        F.col("drug_name_normalized").alias("_dim_key"),
+        "analysis_key", F.col("drug_class_atc"))
+
+
 def _case_drug(spark, data_root: str, latest: DataFrame) -> DataFrame:
     drugs = spark.read.parquet(C.silver_dir(data_root, "drugs"))
-    drug_expr = F.coalesce(
+    norm_expr = F.coalesce(
         F.when(F.trim(F.coalesce(F.col("drug_name_normalized"), F.lit(""))) != "",
                F.col("drug_name_normalized")),
         F.col("drug_name_raw"))
     out = (drugs
            .where(F.upper("role_code").isin(SUSPECT_ROLES))
-           .withColumn("drug", drug_expr)
-           .where(F.col("drug").isNotNull())
-           .join(latest.select("primaryid"), "primaryid")
-           .groupBy("primaryid", "drug")
-           .agg(F.first("drug_class", ignorenulls=True).alias("drug_class")))
-    return out
+           .withColumn("_norm_key", norm_expr)
+           .where(F.col("_norm_key").isNotNull())
+           .join(latest.select("primaryid"), "primaryid"))
+
+    # Option B: re-key to the RxNorm ingredient (analysis_key) when the mart exists,
+    # so the matrix re-aggregates at ingredient level. Absent it, key on the norm name.
+    dim = _drug_dimension(spark, data_root)
+    if dim is not None:
+        out = (out.join(dim, out["_norm_key"] == dim["_dim_key"], "left")
+               .withColumn("drug", F.coalesce("analysis_key", "_norm_key"))
+               .withColumn("drug_class", F.coalesce("drug_class", "drug_class_atc")))
+    else:
+        out = out.withColumn("drug", F.col("_norm_key"))
+
+    return (out
+            .where(F.col("drug").isNotNull())
+            .groupBy("primaryid", "drug")
+            .agg(F.first("drug_class", ignorenulls=True).alias("drug_class")))
 
 
 def _case_reaction(spark, data_root: str, latest: DataFrame) -> DataFrame:

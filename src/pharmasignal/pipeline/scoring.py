@@ -128,7 +128,10 @@ def summary_stats(scores_all: pd.DataFrame) -> pd.DataFrame:
     budget). The complete matrix stays fully reachable via ``/signals``.
     """
     flagged = int(scores_all["disproportionality_flag"].sum()) if not scores_all.empty else 0
-    return pd.DataFrame([{"signal_total": int(len(scores_all)), "flagged_total": flagged}])
+    row = {"signal_total": int(len(scores_all)), "flagged_total": flagged}
+    if "novel_flag" in scores_all.columns:
+        row["novel_total"] = int(scores_all["novel_flag"].fillna(False).astype(bool).sum())
+    return pd.DataFrame([row])
 
 
 def drug_facets(scores_all: pd.DataFrame) -> pd.DataFrame:

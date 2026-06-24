@@ -13,6 +13,9 @@ export type SignalScore = {
   seriousness_rate: number;
   bayesian_shrunken_score: number;
   disproportionality_flag: boolean;
+  /** Label status folded into the matrix (optional — null until labels are built). */
+  label_status?: LabelStatus;
+  novel_flag?: boolean;
 };
 
 export type EmergingSignal = {

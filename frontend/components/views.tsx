@@ -43,7 +43,6 @@ import {
 } from "@/lib/format";
 import type {
   DashboardData,
-  DrugLabelFlag,
   EmergingSignal,
   Filters,
   InteractionSignal,
@@ -55,8 +54,6 @@ import type {
   SignalsPage,
   SubgroupSignal,
 } from "@/lib/types";
-
-export type LabelMap = Map<string, DrugLabelFlag>;
 
 const priorityTone: Record<PriorityLevel, BadgeTone> = {
   High: "high",
@@ -129,11 +126,11 @@ function Combobox({
   );
 }
 
-function LabelBadge({ flag }: { flag?: DrugLabelFlag }) {
-  if (!flag || flag.label_status === "unknown") {
+function LabelBadge({ row }: { row: Pick<SignalScore, "label_status" | "novel_flag"> }) {
+  if (!row.label_status || row.label_status === "unknown") {
     return <span style={{ color: "var(--text-subtle)" }}>—</span>;
   }
-  if (flag.novel_flag) return <Badge tone="novel" dot>Novel</Badge>;
+  if (row.novel_flag) return <Badge tone="novel" dot>Novel</Badge>;
   return <Badge tone="neutral">On-label</Badge>;
 }
 
@@ -142,14 +139,12 @@ export function Overview({
   data,
   filteredSignals,
   emerging,
-  labelMap,
   onSelectSignal,
   onGoNovel,
 }: {
   data: DashboardData;
   filteredSignals: SignalScore[];
   emerging: EmergingSignal[];
-  labelMap: LabelMap;
   onSelectSignal: (s: EmergingSignal) => void;
   onGoNovel: () => void;
 }) {
@@ -160,13 +155,19 @@ export function Overview({
     (a, b) => (b.percent_change ?? 0) - (a.percent_change ?? 0),
   )[0];
 
-  const labelFlags = data.drug_label_flags ?? [];
+  // Label status now rides on each signal_scores row; the bounded sample gives a
+  // representative distribution for the bar, while the headline Novel count is the true
+  // full-matrix total (data.novel_total). hasLabelInfo gates the panel until labels exist.
   const counts = { labeled: 0, novel: 0, unknown: 0 };
-  labelFlags.forEach((f) => (counts[f.label_status] += 1));
-  const labelTotal = labelFlags.length || 1;
+  data.signal_sample.forEach((s) => {
+    if (s.label_status) counts[s.label_status] += 1;
+  });
+  const labelTotal = counts.labeled + counts.novel + counts.unknown || 1;
+  const hasLabelInfo = data.signal_sample.some((s) => s.label_status != null);
+  const pct = (n: number) => Math.round((n / labelTotal) * 100);
   // Novel-flagged signals shown in the label section, drawn from the bounded sample.
   const novelFlagged = data.signal_sample
-    .filter((s) => labelMap.get(pair(s))?.novel_flag)
+    .filter((s) => s.novel_flag)
     .sort((a, b) => b.ror - a.ror);
 
   return (
@@ -203,11 +204,11 @@ export function Overview({
           value={fullNumber(data.pubmed_evidence.length)}
           foot="PubMed evidence"
         />
-        {labelFlags.length > 0 && (
+        {hasLabelInfo && (
           <Stat
             icon={Sparkles}
             label="Novel signals"
-            value={fullNumber(counts.novel)}
+            value={fullNumber(data.novel_total)}
             foot="not on FDA label"
           />
         )}
@@ -262,10 +263,10 @@ export function Overview({
         </div>
       </div>
 
-      {labelFlags.length > 0 && (
+      {hasLabelInfo && (
         <Panel
           title="Label status"
-          caption="Whether each disproportionate signal already appears in FDA labeling. Novel = a reported signal not found in the current label — the highest-interest case."
+          caption="Whether each disproportionate signal already appears in FDA labeling. Novel = a reported signal not found in the current label — the highest-interest case. Distribution shown over a representative sample; the Novel total is over the full matrix."
           action={
             novelFlagged.length ? (
               <button className="button ghost" onClick={onGoNovel}>
@@ -277,14 +278,14 @@ export function Overview({
           <div className="grid-2">
             <div>
               <div className="statusbar" role="img" aria-label="Label status distribution">
-                <i className="labeled" style={{ width: `${(counts.labeled / labelTotal) * 100}%` }} />
-                <i className="novel" style={{ width: `${(counts.novel / labelTotal) * 100}%` }} />
-                <i className="unknown" style={{ width: `${(counts.unknown / labelTotal) * 100}%` }} />
+                <i className="labeled" style={{ width: `${pct(counts.labeled)}%` }} />
+                <i className="novel" style={{ width: `${pct(counts.novel)}%` }} />
+                <i className="unknown" style={{ width: `${pct(counts.unknown)}%` }} />
               </div>
               <div className="status-legend">
-                <span><i className="labeled" /> On-label <b>{counts.labeled}</b></span>
-                <span><i className="novel" /> Novel <b>{counts.novel}</b></span>
-                {counts.unknown > 0 && <span><i className="unknown" /> No label <b>{counts.unknown}</b></span>}
+                <span><i className="labeled" /> On-label <b>{pct(counts.labeled)}%</b></span>
+                <span><i className="novel" /> Novel <b>{fullNumber(data.novel_total)}</b></span>
+                {counts.unknown > 0 && <span><i className="unknown" /> No label <b>{pct(counts.unknown)}%</b></span>}
               </div>
             </div>
             <div className="rows">
@@ -316,7 +317,7 @@ type SortKey = "a_drug_event" | "ror" | "prr" | "chi_square" | "bayesian_shrunke
 
 const PAGE_SIZE = 50;
 
-export function Explorer({ filters, labelMap }: { filters: Filters; labelMap: LabelMap }) {
+export function Explorer({ filters }: { filters: Filters }) {
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({
     key: "ror",
     dir: "desc",
@@ -325,14 +326,15 @@ export function Explorer({ filters, labelMap }: { filters: Filters; labelMap: La
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const hasLabels = labelMap.size > 0;
 
   // Filters/sort changing returns us to the first page.
   useEffect(() => {
     setOffset(0);
-  }, [filters.drugClass, filters.minReports, filters.showFlaggedOnly, filters.query, sort.key, sort.dir]);
+  }, [filters.drugClass, filters.minReports, filters.showFlaggedOnly, filters.showNovelOnly, filters.query, sort.key, sort.dir]);
 
   // Fetch the current page server-side (the full matrix is never loaded in the browser).
+  // "Novel only" is now a pushdown filter on the matrix (novel_flag column), not a
+  // client-side join, so it pages and counts over the FULL set like every other filter.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -341,6 +343,7 @@ export function Explorer({ filters, labelMap }: { filters: Filters; labelMap: La
       drug_class: filters.drugClass !== "All" ? filters.drugClass : undefined,
       min_reports: filters.minReports || undefined,
       flagged_only: filters.showFlaggedOnly || undefined,
+      novel_only: filters.showNovelOnly || undefined,
       q: filters.query.trim() || undefined,
       sort: sort.key,
       desc: sort.dir === "desc",
@@ -353,7 +356,7 @@ export function Explorer({ filters, labelMap }: { filters: Filters; labelMap: La
     return () => {
       cancelled = true;
     };
-  }, [filters.drugClass, filters.minReports, filters.showFlaggedOnly, filters.query, sort.key, sort.dir, offset]);
+  }, [filters.drugClass, filters.minReports, filters.showFlaggedOnly, filters.showNovelOnly, filters.query, sort.key, sort.dir, offset]);
 
   const toggle = (key: SortKey) =>
     setSort((p) => (p.key === key ? { key, dir: p.dir === "desc" ? "asc" : "desc" } : { key, dir: "desc" }));
@@ -368,10 +371,9 @@ export function Explorer({ filters, labelMap }: { filters: Filters; labelMap: La
   );
 
   const total = page?.total ?? 0;
-  // "Novel only" is a label-mart filter (client-side); apply it to the fetched page.
-  const rows = (page?.rows ?? []).filter(
-    (r) => !filters.showNovelOnly || labelMap.get(pair(r))?.novel_flag,
-  );
+  const rows = page?.rows ?? [];
+  // Show the Label column once the matrix carries label status (i.e. labels were built).
+  const hasLabels = rows.some((r) => r.label_status != null);
   const pageStart = total ? offset + 1 : 0;
   const pageEnd = offset + (page?.rows.length ?? 0);
 
@@ -430,7 +432,7 @@ export function Explorer({ filters, labelMap }: { filters: Filters; labelMap: La
                     </td>
                     {hasLabels && (
                       <td>
-                        <LabelBadge flag={labelMap.get(pair(r))} />
+                        <LabelBadge row={r} />
                       </td>
                     )}
                   </tr>

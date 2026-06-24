@@ -58,8 +58,13 @@ def test_dashboard_summary_matches_contract():
     assert isinstance(body["flagged_total"], int)
     assert isinstance(body["signal_sample"], list) and body["signal_sample"]
     row = body["signal_sample"][0]
-    # Exactly the documented columns, nothing leaked from the internal model.
-    assert set(row) == set(service._DASHBOARD_COLUMNS["signal_scores"])
+    # A subset of the documented columns, nothing leaked from the internal model. The
+    # label columns (label_status/novel_flag) are conditional — present only once the
+    # label pipeline has folded them into the matrix.
+    contract = set(service._DASHBOARD_COLUMNS["signal_scores"])
+    optional = {"label_status", "novel_flag"}
+    assert set(row) <= contract
+    assert (contract - optional) <= set(row)
     assert isinstance(row["disproportionality_flag"], bool)
 
 
@@ -86,6 +91,21 @@ def test_signals_pagination_envelope_and_filters():
     # sorted by ROR desc by default
     rors = [r["ror"] for r in rows]
     assert rors == sorted(rors, reverse=True)
+
+
+def test_novel_only_filter_pushdown():
+    # The novel clause is only added when the matrix actually has the novel_flag column
+    # (older gold predates labels), so the query can never reference a missing column.
+    where_on, _ = service._signals_where(None, None, None, False, 0, None,
+                                         novel_only=True, has_novel=True)
+    assert "novel_flag" in where_on
+    where_off, _ = service._signals_where(None, None, None, False, 0, None,
+                                          novel_only=True, has_novel=False)
+    assert "novel_flag" not in where_off
+    # Endpoint accepts the param and still returns a well-formed envelope (demo gold has
+    # no novel_flag column, so the filter is a safe no-op here).
+    body = client.get("/signals", params={"novel_only": True, "limit": 50}).json()
+    assert set(body) == {"total", "offset", "limit", "rows"}
 
 
 def test_signals_offset_pages_distinct_rows():

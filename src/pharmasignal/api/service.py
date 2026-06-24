@@ -31,6 +31,9 @@ _DASHBOARD_COLUMNS: dict[str, list[str]] = {
         "drug_name_normalized", "adverse_event", "drug_class", "a_drug_event",
         "ror", "ror_ci_lower", "ror_ci_upper", "prr", "chi_square",
         "seriousness_rate", "bayesian_shrunken_score", "disproportionality_flag",
+        # Label status folded into the matrix (build_label_flags) so "novel only" is a
+        # pushdown filter, not a client-side join. Absent until labels are built -> nulls.
+        "label_status", "novel_flag",
     ],
     "emerging_signals": [
         "drug_name_normalized", "adverse_event", "drug_class", "current_count",
@@ -151,7 +154,11 @@ def dashboard_summary() -> dict:
         "signal_sample": summary["signal_sample"],
         **tables,
         # Advanced marts embedded for the frontend (empty list when not materialized).
-        **{name: _records(_load(name), cols) for name, cols in _OPTIONAL_COLUMNS.items()},
+        # drug_label_flags is EXCLUDED here — at whole-database scale it is ~1.5M rows
+        # (would blow the payload). Its novel_flag now rides on each signal_scores row;
+        # the per-pair detail stays reachable via the drug-filtered /label-flags endpoint.
+        **{name: _records(_load(name), cols) for name, cols in _OPTIONAL_COLUMNS.items()
+           if name != "drug_label_flags"},
     }
 
 
@@ -169,8 +176,31 @@ def _quote(path: str) -> str:
     return path.replace("'", "''")
 
 
+_signal_cols_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def _signal_cols(frm: str) -> list[str]:
+    """The dashboard signal_scores columns actually present in the live Parquet.
+
+    Older gold predates the label_status/novel_flag columns; selecting a missing column
+    would error, so we intersect the contract with the real schema (read once, cached).
+    """
+    hit = _signal_cols_cache.get(frm)
+    now = time.monotonic()
+    if hit and (now - hit[0]) < _CACHE_TTL:
+        return hit[1]
+    try:
+        present = set(lakehouse.pushdown_query(f"SELECT * FROM {frm} LIMIT 0").columns)
+    except Exception:
+        present = set(_DASHBOARD_COLUMNS["signal_scores"])
+    cols = [c for c in _DASHBOARD_COLUMNS["signal_scores"] if c in present]
+    _signal_cols_cache[frm] = (now, cols)
+    return cols
+
+
 def _signals_where(drug: str | None, event: str | None, drug_class: str | None,
-                   flagged_only: bool, min_reports: int, q: str | None) -> tuple[str, list]:
+                   flagged_only: bool, min_reports: int, q: str | None,
+                   novel_only: bool = False, has_novel: bool = True) -> tuple[str, list]:
     """Build a parameterized WHERE clause (values bound as ``?``, never interpolated)."""
     clauses: list[str] = []
     params: list = []
@@ -185,6 +215,10 @@ def _signals_where(drug: str | None, event: str | None, drug_class: str | None,
         params.extend([f"%{q}%", f"%{q}%"])
     if flagged_only:
         clauses.append("disproportionality_flag")
+    # Novel = disproportionate event not found in the drug's label. Only push the filter
+    # when the column exists (older gold predates labels) so the query never errors.
+    if novel_only and has_novel:
+        clauses.append("novel_flag")
     if min_reports:
         clauses.append("a_drug_event >= ?")
         params.append(int(min_reports))
@@ -194,8 +228,9 @@ def _signals_where(drug: str | None, event: str | None, drug_class: str | None,
 
 def signals(*, drug: str | None = None, event: str | None = None,
             drug_class: str | None = None, flagged_only: bool = False,
-            min_reports: int = 0, q: str | None = None, sort: str = "ror",
-            desc: bool = True, offset: int = 0, limit: int | None = None) -> dict:
+            novel_only: bool = False, min_reports: int = 0, q: str | None = None,
+            sort: str = "ror", desc: bool = True, offset: int = 0,
+            limit: int | None = None) -> dict:
     """Paginated slice of the full signal_scores matrix via DuckDB-over-S3 pushdown.
 
     Returns an envelope ``{total, offset, limit, rows}`` where ``total`` is the count of
@@ -209,15 +244,18 @@ def signals(*, drug: str | None = None, event: str | None = None,
     if not src:
         return empty
 
-    where, params = _signals_where(drug, event, drug_class, flagged_only, min_reports, q)
     frm = f"read_parquet('{_quote(src)}')"
+    cols_list = _signal_cols(frm)
+    has_novel = "novel_flag" in cols_list
+    where, params = _signals_where(drug, event, drug_class, flagged_only,
+                                   min_reports, q, novel_only, has_novel)
     sort_col = sort if sort in _SORTABLE else "ror"
     direction = "DESC" if desc else "ASC"
 
     try:
         total = int(lakehouse.pushdown_query(
             f"SELECT count(*) AS n FROM {frm}{where}", params).iloc[0]["n"])
-        cols = ", ".join(_DASHBOARD_COLUMNS["signal_scores"])
+        cols = ", ".join(cols_list)
         rows = lakehouse.pushdown_query(
             f"SELECT {cols} FROM {frm}{where} "
             f"ORDER BY {sort_col} {direction} NULLS LAST LIMIT {page} OFFSET {offset}",
@@ -225,52 +263,59 @@ def signals(*, drug: str | None = None, event: str | None = None,
     except Exception:  # malformed query / missing column on an older mart -> empty page
         return empty
     return {"total": total, "offset": offset, "limit": page,
-            "rows": _records(rows, _DASHBOARD_COLUMNS["signal_scores"])}
+            "rows": _records(rows, cols_list)}
 
 
 def signals_summary() -> dict:
     """Server-computed aggregates over the *full* matrix + a bounded scatter sample.
 
     Lets the dashboard tiles show true totals and the scatter render without shipping the
-    whole matrix. ``novel_total`` comes from the (small) drug_label_flags mart.
+    whole matrix. ``novel_total`` is the count of novel-flagged pairs in the matrix.
     """
     src = lakehouse.gold_source("signal_scores")
     out = {"signal_total": 0, "flagged_total": 0, "novel_total": 0, "signal_sample": []}
     if not src:
         return out
     frm = f"read_parquet('{_quote(src)}')"
-    cols = ", ".join(_DASHBOARD_COLUMNS["signal_scores"])
+    cols_list = _signal_cols(frm)
+    has_novel = "novel_flag" in cols_list
     try:
         # Totals: prefer the precomputed one-row stats mart so the summary scans NOTHING
         # over the full matrix (keeps cold starts under the API-Gateway timeout). Fall back
         # to live COUNTs only if that mart isn't materialized.
         stats_src = lakehouse.gold_source("signal_scores_stats")
         if stats_src:
-            st = lakehouse.pushdown_query(
-                f"SELECT signal_total, flagged_total FROM read_parquet('{_quote(stats_src)}')").iloc[0]
-            out["signal_total"] = int(st["signal_total"])
-            out["flagged_total"] = int(st["flagged_total"])
+            stats = lakehouse.pushdown_query(
+                f"SELECT * FROM read_parquet('{_quote(stats_src)}')").iloc[0]
+            out["signal_total"] = int(stats["signal_total"])
+            out["flagged_total"] = int(stats["flagged_total"])
+            if "novel_total" in stats.index and pd.notna(stats["novel_total"]):
+                out["novel_total"] = int(stats["novel_total"])
         else:
+            novel_agg = (", count(*) FILTER (WHERE novel_flag) AS novel" if has_novel else "")
             agg = lakehouse.pushdown_query(
                 f"SELECT count(*) AS total, "
-                f"count(*) FILTER (WHERE disproportionality_flag) AS flagged FROM {frm}").iloc[0]
+                f"count(*) FILTER (WHERE disproportionality_flag) AS flagged{novel_agg} "
+                f"FROM {frm}").iloc[0]
             out["signal_total"] = int(agg["total"])
             out["flagged_total"] = int(agg["flagged"])
+            if has_novel:
+                out["novel_total"] = int(agg["novel"])
         # Scatter sample: prefer the precomputed top-by-ROR mart (tiny, no sort needed);
         # fall back to sorting the full matrix only if that mart isn't materialized.
         sample_src = lakehouse.gold_source("signal_scores_sample")
         if sample_src:
-            sample = lakehouse.pushdown_query(
-                f"SELECT {cols} FROM read_parquet('{_quote(sample_src)}')")
+            sample_frm = f"read_parquet('{_quote(sample_src)}')"
+            sample_cols = _signal_cols(sample_frm)
+            sample = lakehouse.pushdown_query(f"SELECT {', '.join(sample_cols)} FROM {sample_frm}")
         else:
+            sample_cols = cols_list
             sample = lakehouse.pushdown_query(
-                f"SELECT {cols} FROM {frm} ORDER BY ror DESC NULLS LAST LIMIT {_SCATTER_SAMPLE}")
-        out["signal_sample"] = _records(sample, _DASHBOARD_COLUMNS["signal_scores"])
+                f"SELECT {', '.join(cols_list)} FROM {frm} ORDER BY ror DESC NULLS LAST "
+                f"LIMIT {_SCATTER_SAMPLE}")
+        out["signal_sample"] = _records(sample, sample_cols)
     except Exception:
         return out
-    labels = _load("drug_label_flags")
-    if labels is not None and "novel_flag" in labels.columns:
-        out["novel_total"] = int(labels["novel_flag"].fillna(False).astype(bool).sum())
     return out
 
 

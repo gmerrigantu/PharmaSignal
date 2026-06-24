@@ -164,18 +164,47 @@ def _build_case_tables(con) -> None:
         SELECT caseid, primaryid FROM ranked WHERE rn = 1
     """)
 
+    # Materialize case_drug deduped on the NORMALIZED name first. Folding the
+    # drug_dimension join into this GROUP BY over the full (~7.7 M row) drugs table blows
+    # the laptop memory budget, so any ingredient re-keying is done as a cheaper second
+    # pass over this already-deduped, much smaller table (see below).
+    norm_key = "COALESCE(NULLIF(d.drug_name_normalized, ''), d.drug_name_raw)"
     _log("materializing case_drug ...")
     con.execute(f"""
         CREATE TABLE case_drug AS
         SELECT DISTINCT lc.primaryid,
-               COALESCE(NULLIF(d.drug_name_normalized, ''), d.drug_name_raw) AS drug,
+               {norm_key} AS drug,
                ANY_VALUE(d.drug_class) AS drug_class
         FROM read_parquet('{drugs}') d
         JOIN latest_case lc ON CAST(d.primaryid AS VARCHAR) = lc.primaryid
         WHERE {_roles_sql()}
-          AND COALESCE(NULLIF(d.drug_name_normalized, ''), d.drug_name_raw) IS NOT NULL
+          AND {norm_key} IS NOT NULL
         GROUP BY lc.primaryid, drug
     """)
+
+    # Option B: when a drug_dimension mart exists, re-key the deduped case_drug to the
+    # RxNorm ingredient (analysis_key) and re-dedup, so the whole matrix re-aggregates at
+    # ingredient level (brand/dose variants collapse). Absent the mart, behaviour is
+    # unchanged. The dim is tiny, so this broadcast join is cheap.
+    dim_uri = storage.gold_uri("drug_dimension")
+    if storage.exists(dim_uri):
+        _log("re-keying drugs to RxNorm ingredient via drug_dimension ...")
+        con.execute(f"""
+            CREATE TABLE case_drug_ingredient AS
+            SELECT cd.primaryid,
+                   COALESCE(dim.analysis_key, cd.drug) AS drug,
+                   -- CAST guards the case where cd.drug_class is an all-NULL column
+                   -- DuckDB typed as INTEGER (COALESCE can't mix it with VARCHAR atc).
+                   ANY_VALUE(COALESCE(CAST(cd.drug_class AS VARCHAR), dim.drug_class_atc)) AS drug_class
+            FROM case_drug cd
+            LEFT JOIN read_parquet('{dim_uri}') dim
+              ON dim.drug_name_normalized = cd.drug
+            -- Group by the explicit expression, not the alias "drug": cd.drug is a real
+            -- input column, so GROUP BY drug would bind to it and drop the re-keying.
+            GROUP BY cd.primaryid, COALESCE(dim.analysis_key, cd.drug)
+        """)
+        con.execute("DROP TABLE case_drug")
+        con.execute("ALTER TABLE case_drug_ingredient RENAME TO case_drug")
 
     _log("materializing case_reaction ...")
     con.execute(f"""
