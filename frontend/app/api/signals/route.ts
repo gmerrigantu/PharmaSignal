@@ -16,6 +16,7 @@ function parseQuery(sp: URLSearchParams): SignalsQuery {
     event: sp.get("event") ?? undefined,
     drug_class: sp.get("drug_class") ?? undefined,
     flagged_only: sp.get("flagged_only") === "true" || undefined,
+    novel_only: sp.get("novel_only") === "true" || undefined,
     min_reports: num("min_reports"),
     q: sp.get("q") ?? undefined,
     sort: sp.get("sort") ?? undefined,
@@ -34,6 +35,7 @@ function demoPage(p: SignalsQuery): SignalsPage {
     .filter((r) => !p.drug_class || p.drug_class === "All" || r.drug_class === p.drug_class)
     .filter((r) => !p.min_reports || r.a_drug_event >= p.min_reports)
     .filter((r) => !p.flagged_only || r.disproportionality_flag)
+    .filter((r) => !p.novel_only || r.novel_flag)
     .filter((r) => !q || `${r.drug_name_normalized} ${r.adverse_event}`.toUpperCase().includes(q))
     .sort((a, b) => {
       const av = Number(a[sortKey] ?? 0);

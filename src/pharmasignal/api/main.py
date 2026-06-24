@@ -70,6 +70,7 @@ def signals(
     event: str | None = Query(None, description="Filter by adverse event term"),
     drug_class: str | None = Query(None),
     flagged_only: bool = Query(False, description="Only disproportionality-flagged pairs"),
+    novel_only: bool = Query(False, description="Only novel pairs (event not in the label)"),
     min_reports: int = Query(0, ge=0, description="Minimum report count (a_drug_event)"),
     q: str | None = Query(None, description="Substring search over drug + event names"),
     sort: str = Query("ror", description="Sort column (ror, a_drug_event, prr, ...)"),
@@ -80,7 +81,8 @@ def signals(
     """Paginated slice of the full signal_scores matrix. Returns
     ``{total, offset, limit, rows}`` — page through ``total`` via ``offset``."""
     return service.signals(drug=drug, event=event, drug_class=drug_class,
-                           flagged_only=flagged_only, min_reports=min_reports, q=q,
+                           flagged_only=flagged_only, novel_only=novel_only,
+                           min_reports=min_reports, q=q,
                            sort=sort, desc=desc, offset=offset, limit=limit)
 
 

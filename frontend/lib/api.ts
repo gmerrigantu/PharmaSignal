@@ -74,6 +74,7 @@ export type SignalsQuery = {
   event?: string;
   drug_class?: string;
   flagged_only?: boolean;
+  novel_only?: boolean;
   min_reports?: number;
   q?: string;
   sort?: string;

@@ -32,20 +32,42 @@ const emergingSignals = [
 const classOf = (drug: string): string =>
   (signalScores.find((r) => r[0] === drug)?.[2] as string | undefined) ?? "Metabolic agent";
 
-const signalSample = signalScores.map((row) => ({
-  drug_name_normalized: row[0] as string,
-  adverse_event: row[1] as string,
-  drug_class: row[2] as string,
-  a_drug_event: row[3] as number,
-  ror: row[4] as number,
-  ror_ci_lower: row[5] as number,
-  ror_ci_upper: row[6] as number,
-  prr: row[7] as number,
-  chi_square: row[8] as number,
-  seriousness_rate: row[9] as number,
-  bayesian_shrunken_score: row[10] as number,
-  disproportionality_flag: row[11] as boolean,
-}));
+// Novel = disproportionate event not found in the drug's label (mirrors drug_label_flags
+// below). Labeled = present in a label section. Folded onto each sample row so demo mode
+// exercises the same row-level "novel only" pushdown filter the live API uses.
+const NOVEL_PAIRS = new Set([
+  "SEMAGLUTIDE::ILEUS",
+  "TIRZEPATIDE::GASTROPARESIS",
+  "DULAGLUTIDE::CHONDRITIS",
+]);
+const LABELED_PAIRS = new Set([
+  "SEMAGLUTIDE::NAUSEA", "SEMAGLUTIDE::VOMITING", "SEMAGLUTIDE::PANCREATITIS",
+  "TIRZEPATIDE::NAUSEA", "TIRZEPATIDE::VOMITING", "LIRAGLUTIDE::PANCREATITIS",
+  "EXENATIDE::HYPOGLYCAEMIA", "METFORMIN::LACTIC ACIDOSIS",
+  "INSULIN GLARGINE::HYPOGLYCAEMIA",
+]);
+
+const signalSample = signalScores.map((row) => {
+  const key = `${row[0]}::${row[1]}`;
+  const novel = NOVEL_PAIRS.has(key);
+  return {
+    drug_name_normalized: row[0] as string,
+    adverse_event: row[1] as string,
+    drug_class: row[2] as string,
+    a_drug_event: row[3] as number,
+    ror: row[4] as number,
+    ror_ci_lower: row[5] as number,
+    ror_ci_upper: row[6] as number,
+    prr: row[7] as number,
+    chi_square: row[8] as number,
+    seriousness_rate: row[9] as number,
+    bayesian_shrunken_score: row[10] as number,
+    disproportionality_flag: row[11] as boolean,
+    label_status: (novel ? "novel" : LABELED_PAIRS.has(key) ? "labeled" : "unknown") as
+      "labeled" | "novel" | "unknown",
+    novel_flag: novel,
+  };
+});
 
 function interaction(
   drug_a: string,

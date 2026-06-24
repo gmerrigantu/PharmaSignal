@@ -36,7 +36,7 @@ import {
 import { fetchDrugClasses } from "@/lib/api";
 import { absoluteTime, downloadCsv, relativeTime } from "@/lib/format";
 import { useTheme } from "@/lib/theme";
-import type { DashboardData, DrugLabelFlag, EmergingSignal, Filters, PriorityLevel } from "@/lib/types";
+import type { DashboardData, EmergingSignal, Filters, PriorityLevel } from "@/lib/types";
 
 type Section =
   | "Overview"
@@ -124,14 +124,13 @@ export function DashboardClient({ data }: { data: DashboardData }) {
     [drugClasses, data.signal_sample],
   );
 
-  const labelMap = useMemo(() => {
-    const m = new Map<string, DrugLabelFlag>();
-    (data.drug_label_flags ?? []).forEach((f) =>
-      m.set(`${f.drug_name_normalized}::${f.adverse_event}`, f),
-    );
-    return m;
-  }, [data.drug_label_flags]);
-  const hasLabels = labelMap.size > 0;
+  // Label status now rides on each signal row (folded into signal_scores by the label
+  // pipeline), so "Novel only" is available whenever the sample carries it — no separate
+  // label mart to join client-side.
+  const hasLabels = useMemo(
+    () => data.signal_sample.some((s) => s.label_status != null),
+    [data.signal_sample],
+  );
 
   const filteredSignals = useMemo(() => {
     const q = filters.query.trim().toUpperCase();
@@ -139,10 +138,10 @@ export function DashboardClient({ data }: { data: DashboardData }) {
       .filter((r) => filters.drugClass === "All" || r.drug_class === filters.drugClass)
       .filter((r) => r.a_drug_event >= filters.minReports)
       .filter((r) => !filters.showFlaggedOnly || r.disproportionality_flag)
-      .filter((r) => !filters.showNovelOnly || labelMap.get(`${r.drug_name_normalized}::${r.adverse_event}`)?.novel_flag)
+      .filter((r) => !filters.showNovelOnly || r.novel_flag)
       .filter((r) => !q || `${r.drug_name_normalized} ${r.adverse_event}`.includes(q))
       .sort((a, b) => b.ror - a.ror);
-  }, [data.signal_sample, filters, labelMap]);
+  }, [data.signal_sample, filters]);
 
   const emerging = useMemo(
     () =>
@@ -345,12 +344,11 @@ export function DashboardClient({ data }: { data: DashboardData }) {
                   data={data}
                   filteredSignals={filteredSignals}
                   emerging={emerging}
-                  labelMap={labelMap}
                   onSelectSignal={(s) => { setSelectedSignal(s); setShowAllEvidence(false); setSection("Evidence"); }}
                   onGoNovel={() => { setFilters((p) => ({ ...p, showNovelOnly: true, showFlaggedOnly: false })); setSection("Explorer"); }}
                 />
               )}
-              {section === "Explorer" && <Explorer filters={filters} labelMap={labelMap} />}
+              {section === "Explorer" && <Explorer filters={filters} />}
               {section === "Profiles" && (
                 <Profiles
                   data={data}

@@ -34,16 +34,22 @@ SECTIONS_BY_SEVERITY = [
 
 
 def fetch_label(canonical: str, aliases: tuple[str, ...], *, api_key: str = "",
-                use_cache: bool = True) -> dict:
+                use_cache: bool = True, rxcui: str | None = None) -> dict:
     """Fetch + cache the merged safety-section text for one drug.
 
     Returns ``{"canonical", "sections": {name: lowercased_text}, "label_count",
     "source_url"}``. ``label_count == 0`` means no label was retrieved (→ "unknown",
     not "novel").
+
+    When ``rxcui`` (an RxNorm ingredient RxCUI) is given it is added to the search as
+    ``openfda.rxcui`` — an exact structured join that resolves the messy-name ambiguity
+    the generic/brand text search suffers from on the whole-database universe.
     """
     terms = sorted({canonical.upper(), *(a.upper() for a in aliases)})
-    search = " OR ".join(
-        f'openfda.generic_name:"{t}" OR openfda.brand_name:"{t}"' for t in terms)
+    clauses = [f'openfda.generic_name:"{t}" OR openfda.brand_name:"{t}"' for t in terms]
+    if rxcui:
+        clauses.append(f'openfda.rxcui:"{rxcui}"')
+    search = " OR ".join(clauses)
     params: dict = {"search": search, "limit": 5}
     if api_key:
         params["api_key"] = api_key
