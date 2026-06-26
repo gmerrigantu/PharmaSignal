@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { ThemeProvider, themeNoFlashScript } from "@/lib/theme";
+import { Analytics } from "@vercel/analytics/next";
 
 export const metadata: Metadata = {
   title: "PharmaSignal — Pharmacovigilance Intelligence",
@@ -22,6 +23,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       </head>
       <body>
         <ThemeProvider>{children}</ThemeProvider>
+        <Analytics />
       </body>
     </html>
   );
